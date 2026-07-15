@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    non_constant_identifier_names: ignore
+    constant_identifier_names: ignore

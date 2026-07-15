@@ -1,0 +1,38 @@
+name: forum_app
+description: "Forum — a Flutter messenger app (web/desktop two-pane layout)."
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.1.2
+  intl: ^0.19.0
+  file_picker: ^8.1.2
+  url_launcher: ^6.3.0
+  web_socket_channel: ^3.0.1
+  http: ^1.2.2
+  shared_preferences: ^2.3.3
+  uuid: ^4.5.1
+  flutter_contacts: ^1.1.9+2
+  path_provider: ^2.1.5
+  cached_network_image: ^3.4.1
+  crypto: ^3.0.6
+  image: ^4.5.4
+  video_player: ^2.9.2
+  firebase_core: ^4.11.0
+  firebase_messaging: ^16.4.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  config:
+    enable-swift-package-manager: false
+  uses-material-design: true

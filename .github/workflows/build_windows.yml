@@ -1,0 +1,93 @@
+# Сборка Windows-приложения из Mac/любой ОС через GitHub Actions.
+# На Mac локально: flutter build windows — невозможно.
+#
+# Как пользоваться:
+#   1. Залейте проект на GitHub
+#   2. Actions → "Build Windows" → Run workflow
+#      (или: git push с меткой/вручную)
+#   3. Скачайте артефакт forum_app-windows.zip
+#
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "lib/**"
+      - "windows/**"
+      - "pubspec.yaml"
+      - "pubspec.lock"
+      - ".github/workflows/build_windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $BuildDir = "build\windows\x64\runner\Release"
+          if (-not (Test-Path "$BuildDir\forum_app.exe")) {
+            throw "forum_app.exe not found in $BuildDir"
+          }
+
+          $Staging = "dist\windows-staging"
+          New-Item -ItemType Directory -Force -Path $Staging | Out-Null
+          Copy-Item -Path "$BuildDir\*" -Destination $Staging -Recurse -Force
+
+          @"
+          @echo off
+          chcp 65001 >nul
+          setlocal
+          set "SRC=%~dp0"
+          set "DEST=%LOCALAPPDATA%\Programs\Forum"
+          echo Installing Forum to %DEST% ...
+          if not exist "%DEST%" mkdir "%DEST%"
+          xcopy /E /I /Y /Q "%SRC%*" "%DEST%\" >nul
+          powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%APPDATA%\Microsoft\Windows\Start Menu\Programs\Forum.lnk'); `$s.TargetPath='%DEST%\forum_app.exe'; `$s.WorkingDirectory='%DEST%'; `$s.Save()"
+          start "" "%DEST%\forum_app.exe"
+          echo Done.
+          pause
+          "@ | Set-Content -Path "$Staging\install_on_this_pc.bat" -Encoding ASCII
+
+          @"
+          Установка Forum на Windows
+          ==========================
+          1. Распакуйте архив
+          2. Запустите install_on_this_pc.bat
+             или forum_app.exe
+
+          Flutter и Visual Studio НЕ нужны.
+          "@ | Set-Content -Path "$Staging\КАК_УСТАНОВИТЬ.txt" -Encoding UTF8
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          if (Test-Path "dist\forum_app-windows.zip") {
+            Remove-Item "dist\forum_app-windows.zip" -Force
+          }
+          Compress-Archive -Path "$Staging\*" -DestinationPath "dist\forum_app-windows.zip" -Force
+          Remove-Item $Staging -Recurse -Force
+          Write-Host "Created dist\forum_app-windows.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forum_app-windows
+          path: dist/forum_app-windows.zip
+          if-no-files-found: error
+          retention-days: 30

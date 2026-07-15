@@ -1,0 +1,436 @@
+import '../models/media_file.dart';
+
+/// Прямоугольник плитки в альбоме медиа (порт MediaMessageCell.swift).
+class MediaTileRect {
+  final double left;
+  final double top;
+  final double width;
+  final double height;
+  final double playIconSize;
+
+  const MediaTileRect({
+    required this.left,
+    required this.top,
+    required this.width,
+    required this.height,
+    this.playIconSize = 40,
+  });
+}
+
+/// Раскладка превью для 1–10 медиа-файлов в одном сообщении.
+class MediaMessageLayout {
+  static const maxFiles = 10;
+  static const maxPreviewHeight = 384.0;
+
+  final double totalWidth;
+  final double totalHeight;
+  final List<MediaTileRect> tiles;
+
+  const MediaMessageLayout({
+    required this.totalWidth,
+    required this.totalHeight,
+    required this.tiles,
+  });
+
+  static double _aspect(MediaFile file) {
+    final w = file.widthValue;
+    final h = file.heightValue;
+    if (w <= 0 || h <= 0) return 1;
+    return w / h;
+  }
+
+  static MediaMessageLayout compute({
+    required List<MediaFile> files,
+    required double width,
+    required bool albumLandscape,
+    double maxHeight = maxPreviewHeight,
+  }) {
+    final count = files.length.clamp(1, maxFiles);
+    final list = files.take(count).toList();
+
+    switch (count) {
+      case 1:
+        return _layout1(list.first, width, maxHeight);
+      case 2:
+        return _layout2(list, width, maxHeight);
+      case 3:
+        return _layout3(list, width, albumLandscape);
+      case 4:
+        return _layout4(width);
+      case 5:
+        return _layout5(width, albumLandscape);
+      case 6:
+        return _layout6(width);
+      case 7:
+        return _layout7(width, albumLandscape);
+      case 8:
+        return _layout8(width);
+      case 9:
+        return _layout9(width);
+      default:
+        return _layout10(width);
+    }
+  }
+
+  static MediaMessageLayout _layout1(MediaFile file, double width, double maxHeight) {
+    final aspect = _aspect(file);
+    final imageHeight = (width / aspect).clamp(0.0, maxHeight);
+    final previewWidth = imageHeight * aspect;
+    return MediaMessageLayout(
+      totalWidth: previewWidth,
+      totalHeight: imageHeight,
+      tiles: [
+        MediaTileRect(
+          left: 0,
+          top: 0,
+          width: previewWidth,
+          height: imageHeight,
+          playIconSize: 60,
+        ),
+      ],
+    );
+  }
+
+  static MediaMessageLayout _layout2(
+    List<MediaFile> files,
+    double width,
+    double maxHeight,
+  ) {
+    final ar1 = _aspect(files[0]);
+    final ar2 = _aspect(files[1]);
+    final horizontal = ar1 > 1 && ar2 > 1;
+
+    if (horizontal) {
+      final h1 = (width / ar1).clamp(0.0, maxHeight / 2);
+      final h2 = (width / ar2).clamp(0.0, maxHeight / 2);
+      return MediaMessageLayout(
+        totalWidth: width,
+        totalHeight: h1 + h2,
+        tiles: [
+          MediaTileRect(left: 0, top: 0, width: width, height: h1),
+          MediaTileRect(left: 0, top: h1, width: width, height: h2),
+        ],
+      );
+    }
+
+    final sharedHeight = (width / (ar1 + ar2)).clamp(0.0, maxHeight);
+    final w1 = sharedHeight * ar1;
+    final w2 = sharedHeight * ar2;
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: sharedHeight,
+      tiles: [
+        MediaTileRect(left: 0, top: 0, width: w1, height: sharedHeight),
+        MediaTileRect(left: w1, top: 0, width: w2, height: sharedHeight),
+      ],
+    );
+  }
+
+  static MediaMessageLayout _layout3(
+    List<MediaFile> files,
+    double width,
+    bool albumLandscape,
+  ) {
+    final tiles = <MediaTileRect>[];
+    for (var i = 0; i < 3; i++) {
+      if (i == 0) {
+        if (albumLandscape) {
+          tiles.add(MediaTileRect(left: 0, top: 0, width: width, height: width / 2));
+        } else {
+          tiles.add(MediaTileRect(left: 0, top: 0, width: width / 2, height: width));
+        }
+      } else if (albumLandscape) {
+        tiles.add(MediaTileRect(
+          left: width / 2 * (i - 1),
+          top: width / 2,
+          width: width / 2,
+          height: width / 2,
+        ));
+      } else {
+        tiles.add(MediaTileRect(
+          left: width / 2,
+          top: width / 2 * (i - 1),
+          width: width / 2,
+          height: width / 2,
+        ));
+      }
+    }
+    return MediaMessageLayout(totalWidth: width, totalHeight: width, tiles: tiles);
+  }
+
+  static MediaMessageLayout _layout4(double width) {
+    final half = width / 2;
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: width,
+      tiles: [
+        for (var i = 0; i < 4; i++)
+          MediaTileRect(
+            left: half * (i < 2 ? i : i - 2),
+            top: i < 2 ? 0 : half,
+            width: half,
+            height: half,
+          ),
+      ],
+    );
+  }
+
+  static MediaMessageLayout _layout5(double width, bool albumLandscape) {
+    final half = width / 2;
+    final totalHeight = width + half;
+    final tiles = <MediaTileRect>[];
+
+    for (var i = 0; i < 5; i++) {
+      if (i == 0) {
+        if (albumLandscape) {
+          tiles.add(MediaTileRect(left: 0, top: 0, width: width, height: half));
+        } else {
+          tiles.add(MediaTileRect(left: 0, top: 0, width: half, height: width));
+        }
+      } else if (albumLandscape) {
+        if (i < 3) {
+          tiles.add(MediaTileRect(
+            left: half * (i - 1),
+            top: half,
+            width: half,
+            height: half,
+          ));
+        } else {
+          tiles.add(MediaTileRect(
+            left: half * (i - 3),
+            top: width,
+            width: half,
+            height: half,
+          ));
+        }
+      } else if (i < 3) {
+        tiles.add(MediaTileRect(
+          left: half,
+          top: half * (i - 1),
+          width: half,
+          height: half,
+        ));
+      } else {
+        tiles.add(MediaTileRect(
+          left: half * (i - 3),
+          top: width,
+          width: half,
+          height: half,
+        ));
+      }
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: totalHeight,
+      tiles: tiles,
+    );
+  }
+
+  static MediaMessageLayout _layout6(double width) {
+    final half = width / 2;
+    final totalHeight = width + half;
+    final tiles = <MediaTileRect>[];
+
+    for (var i = 0; i < 6; i++) {
+      double top;
+      double left;
+      if (i < 2) {
+        top = 0;
+        left = half * i;
+      } else if (i < 4) {
+        top = half;
+        left = half * (i - 2);
+      } else {
+        top = width;
+        left = half * (i - 4);
+      }
+      tiles.add(MediaTileRect(left: left, top: top, width: half, height: half));
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: totalHeight,
+      tiles: tiles,
+    );
+  }
+
+  static MediaMessageLayout _layout7(double width, bool albumLandscape) {
+    final half = width / 2;
+    final quarter = width / 4;
+    final totalHeight = width + quarter;
+    final tiles = <MediaTileRect>[];
+
+    for (var i = 0; i < 7; i++) {
+      if (i == 0) {
+        if (albumLandscape) {
+          tiles.add(MediaTileRect(left: 0, top: 0, width: width, height: half));
+        } else {
+          tiles.add(MediaTileRect(left: 0, top: 0, width: half, height: width));
+        }
+      } else if (i < 3) {
+        if (albumLandscape) {
+          tiles.add(MediaTileRect(
+            left: half * (i - 1),
+            top: half,
+            width: half,
+            height: half,
+          ));
+        } else {
+          tiles.add(MediaTileRect(
+            left: half,
+            top: half * (i - 1),
+            width: half,
+            height: half,
+          ));
+        }
+      } else {
+        tiles.add(MediaTileRect(
+          left: quarter * (i - 3),
+          top: width,
+          width: quarter,
+          height: quarter,
+          playIconSize: 32,
+        ));
+      }
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: totalHeight,
+      tiles: tiles,
+    );
+  }
+
+  static MediaMessageLayout _layout8(double width) {
+    final half = width / 2;
+    final quarter = width / 4;
+    final totalHeight = width + quarter;
+    final tiles = <MediaTileRect>[];
+
+    for (var i = 0; i < 8; i++) {
+      if (i < 2) {
+        tiles.add(MediaTileRect(
+          left: half * i,
+          top: 0,
+          width: half,
+          height: half,
+        ));
+      } else if (i < 4) {
+        tiles.add(MediaTileRect(
+          left: half * (i - 2),
+          top: half,
+          width: half,
+          height: half,
+        ));
+      } else {
+        tiles.add(MediaTileRect(
+          left: quarter * (i - 4),
+          top: width,
+          width: quarter,
+          height: quarter,
+          playIconSize: 32,
+        ));
+      }
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: totalHeight,
+      tiles: tiles,
+    );
+  }
+
+  static MediaMessageLayout _layout9(double width) {
+    final quarter = width / 4;
+    final totalHeight = width + halfWidth(width);
+    final tiles = <MediaTileRect>[];
+
+    for (var i = 0; i < 9; i++) {
+      if (i == 0) {
+        tiles.add(MediaTileRect(
+          left: 0,
+          top: 0,
+          width: width,
+          height: width,
+          playIconSize: 40,
+        ));
+      } else if (i < 5) {
+        tiles.add(MediaTileRect(
+          left: quarter * (i - 1),
+          top: width,
+          width: quarter,
+          height: quarter,
+          playIconSize: 32,
+        ));
+      } else {
+        tiles.add(MediaTileRect(
+          left: quarter * (i - 5),
+          top: width + quarter,
+          width: quarter,
+          height: quarter,
+          playIconSize: 32,
+        ));
+      }
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: totalHeight,
+      tiles: tiles,
+    );
+  }
+
+  static MediaMessageLayout _layout10(double width) {
+    final half = width / 2;
+    final quarter = width / 4;
+    final tiles = <MediaTileRect>[];
+
+    for (var i = 0; i < 10; i++) {
+      if (i < 2) {
+        tiles.add(MediaTileRect(
+          left: half * i,
+          top: 0,
+          width: half,
+          height: half,
+          playIconSize: i < 2 ? 40 : 32,
+        ));
+      } else if (i < 6) {
+        tiles.add(MediaTileRect(
+          left: quarter * (i - 2),
+          top: half,
+          width: quarter,
+          height: quarter,
+          playIconSize: 32,
+        ));
+      } else {
+        tiles.add(MediaTileRect(
+          left: quarter * (i - 6),
+          top: half + quarter,
+          width: quarter,
+          height: quarter,
+          playIconSize: 32,
+        ));
+      }
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: width,
+      tiles: tiles,
+    );
+  }
+
+  static double halfWidth(double width) => width / 2;
+}
+
+/// Альбом «широкий», если суммарная ширина больше высоты (как model.size в iOS).
+bool mediaAlbumIsLandscape(List<MediaFile> files) {
+  var totalW = 0.0;
+  var totalH = 0.0;
+  for (final f in files) {
+    totalW += f.widthValue > 0 ? f.widthValue : 1;
+    totalH += f.heightValue > 0 ? f.heightValue : 1;
+  }
+  return totalW > totalH;
+}
