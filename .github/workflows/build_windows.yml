@@ -1,11 +1,6 @@
-# Сборка Windows-приложения из Mac/любой ОС через GitHub Actions.
-# На Mac локально: flutter build windows — невозможно.
+# Сборка Windows-приложения через GitHub Actions (с Mac нельзя локально).
 #
-# Как пользоваться:
-#   1. Залейте проект на GitHub
-#   2. Actions → "Build Windows" → Run workflow
-#      (или: git push с меткой/вручную)
-#   3. Скачайте артефакт forum_app-windows.zip
+# Actions → "Build Windows" → Run workflow → скачать artifact forum_app-windows
 #
 name: Build Windows
 
@@ -25,7 +20,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -33,11 +28,33 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Doctor
+        run: flutter doctor -v
+
       - name: Dependencies
         run: flutter pub get
 
       - name: Build Windows release
-        run: flutter build windows --release
+        shell: pwsh
+        run: |
+          flutter build windows --release *>&1 | Tee-Object -FilePath build_windows.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "===== LAST 120 LINES OF BUILD LOG ====="
+            Get-Content build_windows.log -Tail 120
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-log
+          path: build_windows.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package ZIP
         shell: pwsh

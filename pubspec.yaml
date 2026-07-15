@@ -36,3 +36,7 @@ flutter:
   config:
     enable-swift-package-manager: false
   uses-material-design: true
+
+# Avoid jni FFI being pulled into Windows desktop builds via path_provider_android 2.3+.
+dependency_overrides:
+  path_provider_android: 2.2.17
