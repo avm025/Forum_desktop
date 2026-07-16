@@ -17,17 +17,36 @@ class ApiConfig {
   /// Заголовок Key для HTTP-запросов.
   static const String apiKey = 'Ru*)P(-ro.pro';
 
-  /// JWT-токен (временно константа, как в ТЗ).
-  static const String token =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpIjoiODA0MzQxMTI4ODMxNTU5IiwiaWF0IjoxNzgxODc2NzE3LCJleHAiOjE4MTM0MzQzMTd9.sjvvdm0bmHCrsYQIDrRp1zHNxm8eF3txa8hFoXvpS-8';
+  /// JWT текущей сессии (после SMS / QR). Пустой — экран онбординга.
+  static String _sessionToken = '';
 
-  static Uri get wsUri => Uri.parse('$wsHost?key=$token');
+  static String get token => _sessionToken;
+
+  static bool get hasSession => _sessionToken.trim().isNotEmpty;
+
+  static void setSessionToken(String? value) {
+    _sessionToken = value?.trim() ?? '';
+  }
+
+  /// WS URL: с JWT после входа, без `key` на экране QR.
+  static Uri get wsUri {
+    final t = token;
+    if (t.isEmpty) return Uri.parse(wsHost);
+    return Uri.parse('$wsHost?key=${Uri.encodeQueryComponent(t)}');
+  }
+
   static Uri get httpApiUri => Uri.parse(httpApiUrl);
   static Uri get uploadServerUri => Uri.parse(uploadServerUrl);
 
   static Map<String, String> get authHeaders => {
         'Content-Type': 'application/json; charset=utf-8',
-        'Authorization': 'Bearer $token',
+        if (hasSession) 'Authorization': 'Bearer $token',
+        'Key': apiKey,
+      };
+
+  /// HTTP без Bearer: `sms`, `check_code`, `database`.
+  static Map<String, String> get openHttpHeaders => {
+        'Content-Type': 'application/json; charset=utf-8',
         'Key': apiKey,
       };
 

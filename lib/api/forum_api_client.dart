@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../models/auth_models.dart';
 import '../models/dialog_group.dart';
 import '../models/emoji_category.dart';
 import '../models/dialogs_list_view_model.dart';
@@ -51,6 +52,9 @@ typedef MsgDelPushHandler = void Function(Map<String, dynamic> data);
 /// Push `add_like` — обновление реакций (WS_MSG_LIKES.md).
 typedef AddLikePushHandler = void Function(Map<String, dynamic> data);
 
+/// Push `check_qr` с JWT на ожидающем устройстве (онбординг).
+typedef CheckQrAuthHandler = void Function(Map<String, dynamic> data);
+
 typedef WsVoidCallback = void Function();
 
 /// Клиент Forum API.
@@ -66,6 +70,7 @@ class ForumApiClient {
   StatusPushHandler? onStatusPush;
   MsgDelPushHandler? onMsgDelPush;
   AddLikePushHandler? onAddLikePush;
+  CheckQrAuthHandler? onCheckQrAuth;
   WsVoidCallback? onDisconnected;
 
   bool _suppressDisconnect = false;
@@ -230,10 +235,124 @@ class ForumApiClient {
     onStatusPush = null;
     onMsgDelPush = null;
     onAddLikePush = null;
+    onCheckQrAuth = null;
     onDisconnected = null;
     _uploader.close();
     _http.close();
     disconnect();
+  }
+
+  /// WS `get_qr` — URL для QR на экране онбординга.
+  Future<String> requestQr() async {
+    final resp = await sendWs({'type': 'get_qr'});
+    final qr = resp['qr']?.toString().trim() ?? '';
+    if (qr.isEmpty) {
+      throw ForumApiException('Пустой QR от сервера', payload: resp);
+    }
+    return qr;
+  }
+
+  /// HTTP `sms` — запрос кода (Bearer не нужен).
+  Future<SmsRequestResult> requestSms({
+    required String phone,
+    required String prefix,
+    required String prfxId,
+    bool test = false,
+  }) async {
+    final payload = {
+      'type': 'sms',
+      'data': {
+        'phone': phone,
+        'prefix': prefix,
+        'prfxid': prfxId,
+        'test': test,
+      },
+    };
+    final body = jsonEncode(payload);
+    ApiLogger.instance.logHttpSend('POST', ApiConfig.httpApiUrl, body);
+
+    final sw = Stopwatch()..start();
+    final response = await _http
+        .post(
+          ApiConfig.httpApiUri,
+          headers: ApiConfig.openHttpHeaders,
+          body: body,
+        )
+        .timeout(const Duration(seconds: 30));
+    sw.stop();
+    ApiLogger.instance.logHttpReceive(
+      response.statusCode,
+      response.body,
+      duration: sw.elapsed,
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ForumApiException('HTTP ${response.statusCode}: ${response.body}');
+    }
+
+    final map = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+    if (map['success'] != true) {
+      throw ForumApiException(
+        map['message']?.toString() ?? 'Не удалось отправить SMS',
+        payload: map,
+      );
+    }
+
+    final id = map['id']?.toString() ?? '';
+    if (id.isEmpty) {
+      throw ForumApiException('Сервер не вернул id SMS', payload: map);
+    }
+    return SmsRequestResult(
+      id: id,
+      hintText: map['text']?.toString(),
+    );
+  }
+
+  /// HTTP `check_code` — проверка кода и JWT.
+  Future<CheckCodeResult> checkSmsCode({
+    required String smsId,
+    required String code,
+  }) async {
+    final payload = {
+      'type': 'check_code',
+      'id': smsId,
+      'code': code,
+    };
+    final body = jsonEncode(payload);
+    ApiLogger.instance.logHttpSend('POST', ApiConfig.httpApiUrl, body);
+
+    final sw = Stopwatch()..start();
+    final response = await _http
+        .post(
+          ApiConfig.httpApiUri,
+          headers: ApiConfig.openHttpHeaders,
+          body: body,
+        )
+        .timeout(const Duration(seconds: 30));
+    sw.stop();
+    ApiLogger.instance.logHttpReceive(
+      response.statusCode,
+      response.body,
+      duration: sw.elapsed,
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ForumApiException('HTTP ${response.statusCode}: ${response.body}');
+    }
+
+    final map = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+    if (map['success'] != true) {
+      throw ForumApiException(
+        map['message']?.toString() ?? 'Неверный код',
+        payload: map,
+      );
+    }
+
+    final result = CheckCodeResult.fromJson(map);
+    if (result.token.isEmpty) {
+      throw ForumApiException('Сервер не вернул token', payload: map);
+    }
+    return result;
   }
 
   /// Загрузка фото/видео перед отправкой WS `msg` type=media.
@@ -408,7 +527,9 @@ class ForumApiClient {
     final response = await _http
         .post(
           ApiConfig.httpApiUri,
-          headers: ApiConfig.authHeaders,
+          headers: ApiConfig.hasSession
+              ? ApiConfig.authHeaders
+              : ApiConfig.openHttpHeaders,
           body: body,
         )
         .timeout(const Duration(seconds: 30));
@@ -454,7 +575,9 @@ class ForumApiClient {
     final response = await _http
         .post(
           ApiConfig.httpApiUri,
-          headers: ApiConfig.authHeaders,
+          headers: ApiConfig.hasSession
+              ? ApiConfig.authHeaders
+              : ApiConfig.openHttpHeaders,
           body: body,
         )
         .timeout(const Duration(seconds: 30));
@@ -619,6 +742,22 @@ class ForumApiClient {
         _pending.remove(type);
         ApiLogger.instance.logWsReceive(type, map);
         onAddLikePush?.call(map);
+        return;
+      }
+
+      if (type == 'check_qr') {
+        ApiLogger.instance.logWsReceive(type, map);
+        final data = map['data'];
+        if (data is Map) {
+          final token = data['token']?.toString() ?? '';
+          if (token.isNotEmpty) {
+            onCheckQrAuth?.call(Map<String, dynamic>.from(data));
+          }
+        }
+        final completer = _pending.remove(type);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(map);
+        }
         return;
       }
 

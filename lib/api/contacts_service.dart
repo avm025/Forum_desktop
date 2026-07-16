@@ -24,35 +24,42 @@ class ContactsService {
     if (kIsWeb) return const [];
 
     try {
-      // На macOS диалог контактов блокирует UI, если запросить до появления окна.
-      if (!kIsWeb && Platform.isMacOS) {
-        await Future<void>.delayed(const Duration(milliseconds: 800));
-      }
-
-      final granted = await FlutterContacts.requestPermission(readonly: true);
-      if (!granted) return const [];
-
-      final raw = await FlutterContacts.getContacts(withProperties: true);
-      final result = <ApiContact>[];
-      final seen = <String>{};
-
-      for (final c in raw) {
-        final name = c.displayName.trim();
-        for (final phone in c.phones) {
-          final normalized = _normalizePhone(phone.number);
-          if (normalized.isEmpty || seen.contains(normalized)) continue;
-          seen.add(normalized);
-          result.add(ApiContact(
-            phone: normalized,
-            name: name.isNotEmpty ? name : normalized,
-          ));
-        }
-      }
-      _cache = result;
-      return result;
+      return await _loadContactsInner().timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => const [],
+      );
     } catch (_) {
       return const [];
     }
+  }
+
+  static Future<List<ApiContact>> _loadContactsInner() async {
+    // На macOS диалог контактов блокирует UI, если запросить до появления окна.
+    if (!kIsWeb && Platform.isMacOS) {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+
+    final granted = await FlutterContacts.requestPermission(readonly: true);
+    if (!granted) return const [];
+
+    final raw = await FlutterContacts.getContacts(withProperties: true);
+    final result = <ApiContact>[];
+    final seen = <String>{};
+
+    for (final c in raw) {
+      final name = c.displayName.trim();
+      for (final phone in c.phones) {
+        final normalized = _normalizePhone(phone.number);
+        if (normalized.isEmpty || seen.contains(normalized)) continue;
+        seen.add(normalized);
+        result.add(ApiContact(
+          phone: normalized,
+          name: name.isNotEmpty ? name : normalized,
+        ));
+      }
+    }
+    _cache = result;
+    return result;
   }
 
   /// Оставляет только цифры, убирает ведущий «+» и прочие символы.

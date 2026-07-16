@@ -76,6 +76,35 @@ class ProfileScreen extends StatelessWidget {
                   );
                 },
               ),
+              _SettingsTile(
+                icon: Icons.logout_rounded,
+                label: 'Выйти',
+                subtitle: 'Сменить аккаунт на этом устройстве',
+                onTap: () async {
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Выйти?'),
+                      content: const Text(
+                        'Вы выйдете из аккаунта на этом устройстве.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx, false),
+                          child: const Text('Отмена'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx, true),
+                          child: const Text('Выйти'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (ok == true && context.mounted) {
+                    await context.read<AppState>().logOut();
+                  }
+                },
+              ),
             ],
           ),
         ],

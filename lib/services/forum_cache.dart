@@ -58,6 +58,25 @@ class ForumCache {
     return _readMap('profile.json');
   }
 
+  Future<void> clearSessionData() async {
+    final dir = await _cacheDir();
+    if (dir == null) return;
+    try {
+      for (final name in ['dialogs.json', 'groups.json', 'profile.json']) {
+        final file = File('${dir.path}/$name');
+        if (await file.exists()) await file.delete();
+      }
+      await for (final entity in dir.list()) {
+        if (entity is File) {
+          final base = entity.uri.pathSegments.last;
+          if (base.startsWith('msgs_') || base.startsWith('scroll_')) {
+            await entity.delete();
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> saveMessages(String dlgId, Map<String, dynamic> response) async {
     await _write('msgs_$dlgId.json', jsonEncode(response));
   }

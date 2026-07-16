@@ -8,6 +8,7 @@ import '../api/contacts_service.dart';
 import '../api/device_id_service.dart';
 import '../api/client_msg_hash.dart';
 import '../api/avatar_upload.dart';
+import '../api/api_config.dart';
 import '../api/forum_api_client.dart';
 import '../api/file_uploader.dart';
 import '../api/forward_mapper.dart';
@@ -21,6 +22,7 @@ import '../api/outgoing_message_payload.dart';
 import '../api/profile_mapper.dart';
 import '../api/uploaded_file_info.dart';
 import '../models/appearance_settings.dart';
+import '../models/auth_models.dart';
 import '../models/chat_scroll_anchor.dart';
 import '../models/dialog_group.dart';
 import '../models/dialogs_list_view_model.dart';
@@ -32,6 +34,7 @@ import '../models/message_view_model.dart';
 import '../models/user_profile.dart';
 import '../services/appearance_prefs.dart';
 import '../services/api_logger.dart';
+import '../services/auth_session.dart';
 import '../services/firebase_service.dart';
 import '../services/forum_cache.dart';
 import '../theme/app_theme.dart';
@@ -132,6 +135,12 @@ class AppState extends ChangeNotifier {
 
   ConnectionStatus _connectionStatus = ConnectionStatus.idle;
   ConnectionStatus get connectionStatus => _connectionStatus;
+
+  bool _authReady = false;
+  bool get authReady => _authReady;
+
+  bool _isAuthenticated = false;
+  bool get isAuthenticated => _isAuthenticated;
 
   String? _connectionError;
   String? get connectionError => _connectionError;
@@ -278,7 +287,72 @@ class AppState extends ChangeNotifier {
       _appearance = cachedAppearance;
     }
     await _loadDatabaseCatalogs();
+
+    final token = await AuthSession.loadToken();
+    ApiConfig.setSessionToken(token);
+    _isAuthenticated = token != null && token.isNotEmpty;
+    _authReady = true;
+    notifyListeners();
+
+    if (!_isAuthenticated) {
+      return;
+    }
     return _bootstrap();
+  }
+
+  /// Страны для экрана телефона (`database.countries`).
+  Future<List<AuthCountry>> loadAuthCountries() async {
+    try {
+      final resp = await _api.fetchDatabase();
+      return AuthCountry.listFromDatabase(resp);
+    } catch (_) {
+      return const [AuthCountry.russia];
+    }
+  }
+
+  /// После SMS / QR: сохранить JWT и сразу показать Home.
+  /// Bootstrap (WS / контакты) идёт в фоне — не блокирует экран кода.
+  Future<void> completeAuthentication({
+    required String token,
+    String? userId,
+    String? phone,
+  }) async {
+    await AuthSession.save(
+      token: token,
+      userId: userId,
+      phone: phone,
+    );
+    ApiConfig.setSessionToken(token);
+    _isAuthenticated = true;
+    notifyListeners();
+    unawaited(_bootstrap());
+  }
+
+  /// Выход: очистка сессии и возврат на онбординг.
+  Future<void> logOut() async {
+    try {
+      if (_api.isConnected) {
+        final uid = await DeviceIdService.getOrCreate();
+        try {
+          await _api.sendWs({
+            'type': 'log_out',
+            'data': {'uid': uid},
+          });
+        } catch (_) {}
+      }
+    } catch (_) {}
+    await _api.disconnect();
+    await AuthSession.clear();
+    ApiConfig.setSessionToken(null);
+    await ForumCache.instance.clearSessionData();
+    _profile = null;
+    _dialogs = [];
+    _groups = [];
+    _selectedId = null;
+    _isAuthenticated = false;
+    _connectionStatus = ConnectionStatus.idle;
+    _connectionError = null;
+    notifyListeners();
   }
 
   Future<void> retryConnection() {
@@ -302,8 +376,6 @@ class AppState extends ChangeNotifier {
     _refreshing = true;
     notifyListeners();
 
-    final contactsFuture = ContactsService.loadContacts();
-
     try {
       final uid = await DeviceIdService.getOrCreate();
       await _api.connect();
@@ -314,7 +386,9 @@ class AppState extends ChangeNotifier {
       _mergeServerAppearance(_profile!.appearance);
       unawaited(AppearancePrefs.save(_appearance));
 
-      final contacts = await contactsFuture;
+      // Контакты не блокируют вход: диалог macOS может висеть бесконечно.
+      final contacts = await ContactsService.loadContacts()
+          .timeout(const Duration(seconds: 3), onTimeout: () => const []);
 
       final dialogsFuture = _api.fetchDialogs(contacts);
       final groupsFuture = _api.fetchGroups();
@@ -1334,6 +1408,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _scheduleReconnect() {
+    if (!_isAuthenticated) return;
     if (_reconnectPending) return;
     _reconnectPending = true;
     _connectionStatus = ConnectionStatus.error;
@@ -1342,7 +1417,7 @@ class AppState extends ChangeNotifier {
 
     Future<void>.delayed(const Duration(seconds: 2), () async {
       _reconnectPending = false;
-      if (_api.isConnected) return;
+      if (!_isAuthenticated || _api.isConnected) return;
       try {
         final uid = await DeviceIdService.getOrCreate();
         await _api.connect();

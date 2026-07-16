@@ -6,10 +6,10 @@ PODS:
   - Firebase/Messaging (12.15.0):
     - Firebase/CoreOnly
     - FirebaseMessaging (~> 12.15.0)
-  - firebase_core (4.11.0):
+  - firebase_core (4.12.1):
     - Firebase/CoreOnly (~> 12.15.0)
     - FlutterMacOS
-  - firebase_messaging (16.4.1):
+  - firebase_messaging (16.4.3):
     - Firebase/CoreOnly (~> 12.15.0)
     - Firebase/Messaging (~> 12.15.0)
     - firebase_core
@@ -123,8 +123,8 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   file_picker: 7584aae6fa07a041af2b36a2655122d42f578c1a
   Firebase: a8539b633d474fbeb654c7043f9c1649e274045b
-  firebase_core: 4922bf7ac16c97fb67008a1a00842059b345b0d9
-  firebase_messaging: 6c506190a7499e67e644957961f86efe1ac1c3e3
+  firebase_core: 1c188a8384be0315478a22c1a3165871d75a95ba
+  firebase_messaging: 0a1020fbef83562475d63ce805b7fa5d25cb2629
   FirebaseCore: 2e86a4ea1684d4381707069e4a6d89ac808e901e
   FirebaseCoreInternal: 6ab6a02c94446c026d2cf35cf5383842ebaa4992
   FirebaseInstallations: eb29ccbf64eaedf86fd5b2ccc7fabde567660b52
