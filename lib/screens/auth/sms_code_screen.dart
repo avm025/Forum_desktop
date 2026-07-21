@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../../api/forum_api_client.dart';
 import '../../models/auth_models.dart';
+import '../../services/auth_debug.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_colors.dart';
 
@@ -15,6 +16,8 @@ class SmsCodeScreen extends StatefulWidget {
   final AuthCountry country;
   final String smsId;
   final String? hintText;
+  /// Код из ответа `sms.text` (test-режим) — нужен для отладочного суффикса номера.
+  final String? serverCode;
 
   const SmsCodeScreen({
     super.key,
@@ -22,6 +25,7 @@ class SmsCodeScreen extends StatefulWidget {
     required this.country,
     required this.smsId,
     this.hintText,
+    this.serverCode,
   });
 
   @override
@@ -35,6 +39,8 @@ class _SmsCodeScreenState extends State<SmsCodeScreen> {
   final _focusNodes = List.generate(5, (_) => FocusNode());
 
   late String _smsId;
+  String? _serverCode;
+  String? _hintText;
   String? _error;
   bool _submitting = false;
   bool _resending = false;
@@ -45,6 +51,10 @@ class _SmsCodeScreenState extends State<SmsCodeScreen> {
   void initState() {
     super.initState();
     _smsId = widget.smsId;
+    _serverCode = widget.serverCode ?? AuthDebug.parseServerCode(widget.hintText);
+    _hintText = AuthDebug.enabled
+        ? AuthDebug.hintForPhone(widget.phone)
+        : widget.hintText;
     _startCooldown();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusNodes.first.requestFocus();
@@ -90,7 +100,12 @@ class _SmsCodeScreenState extends State<SmsCodeScreen> {
       _error = null;
     });
     try {
-      final result = await _api.checkSmsCode(smsId: _smsId, code: _code);
+      final codeToSend = AuthDebug.resolveCheckCode(
+        entered: _code,
+        phone: widget.phone,
+        serverCodeFromHint: _serverCode,
+      );
+      final result = await _api.checkSmsCode(smsId: _smsId, code: codeToSend);
       if (!mounted) return;
       await context.read<AppState>().completeAuthentication(
             token: result.token,
@@ -127,15 +142,22 @@ class _SmsCodeScreenState extends State<SmsCodeScreen> {
         phone: widget.phone,
         prefix: widget.country.prefixWithPlus,
         prfxId: widget.country.prfxId,
-        test: false,
+        test: AuthDebug.useTestSms,
       );
       if (!mounted) return;
       _smsId = result.id;
-      if (result.hintText != null && result.hintText!.trim().isNotEmpty) {
+      _serverCode = AuthDebug.parseServerCode(result.hintText);
+      _hintText = AuthDebug.enabled
+          ? AuthDebug.hintForPhone(widget.phone)
+          : result.hintText;
+      if (!AuthDebug.enabled &&
+          result.hintText != null &&
+          result.hintText!.trim().isNotEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(result.hintText!)),
         );
       }
+      setState(() {});
       _startCooldown();
     } on ForumApiException catch (e) {
       if (!mounted) return;
@@ -209,11 +231,11 @@ class _SmsCodeScreenState extends State<SmsCodeScreen> {
                       color: Color(0xFF666666),
                     ),
                   ),
-                  if (widget.hintText != null &&
-                      widget.hintText!.trim().isNotEmpty) ...[
+                  if (_hintText != null &&
+                      _hintText!.trim().isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Text(
-                      widget.hintText!,
+                      _hintText!,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                         fontSize: 13,

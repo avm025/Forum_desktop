@@ -24,6 +24,7 @@ import '../api/uploaded_file_info.dart';
 import '../models/appearance_settings.dart';
 import '../models/auth_models.dart';
 import '../models/chat_scroll_anchor.dart';
+import '../models/device_session.dart';
 import '../models/dialog_group.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/forum_database.dart';
@@ -83,6 +84,7 @@ class AppState extends ChangeNotifier {
     _api.onStatusPush = _onStatusPush;
     _api.onMsgDelPush = _onMsgDelPush;
     _api.onAddLikePush = _onAddLikePush;
+    _api.onForceLogOut = _onForceLogOut;
     _api.onDisconnected = _scheduleReconnect;
     FirebaseService.instance.bindApiClient(_api);
   }
@@ -328,32 +330,81 @@ class AppState extends ChangeNotifier {
     unawaited(_bootstrap());
   }
 
-  /// Выход: очистка сессии и возврат на онбординг.
-  Future<void> logOut() async {
+  bool _loggingOut = false;
+
+  /// Выход: очистка сессии, кредов и всех локальных кэшей, возврат на онбординг.
+  /// [sendToServer] = false — принудительный выход по `action: log_out`
+  /// (сервер уже отвязал устройство, повторный WS `log_out` не нужен).
+  Future<void> logOut({bool sendToServer = true}) async {
+    if (_loggingOut) return;
+    _loggingOut = true;
     try {
-      if (_api.isConnected) {
-        final uid = await DeviceIdService.getOrCreate();
+      if (sendToServer) {
         try {
-          await _api.sendWs({
-            'type': 'log_out',
-            'data': {'uid': uid},
-          });
+          if (_api.isConnected) {
+            final uid = await DeviceIdService.getOrCreate();
+            await _api.sendWs({
+              'type': 'log_out',
+              'data': {'uid': uid},
+            });
+          }
         } catch (_) {}
       }
-    } catch (_) {}
-    await _api.disconnect();
-    await AuthSession.clear();
-    ApiConfig.setSessionToken(null);
-    await ForumCache.instance.clearSessionData();
-    _profile = null;
-    _dialogs = [];
-    _groups = [];
-    _selectedId = null;
-    _isAuthenticated = false;
-    _connectionStatus = ConnectionStatus.idle;
-    _connectionError = null;
-    notifyListeners();
+      await _api.disconnect();
+      await AuthSession.clear();
+      ApiConfig.setSessionToken(null);
+      await ForumCache.instance.clearAll();
+      _profile = null;
+      _dialogs = [];
+      _groups = [];
+      _selectedId = null;
+      _messagesLoadedFor.clear();
+      _msgHasMore.clear();
+      _messageLoadsInFlight.clear();
+      _chatScrollAnchors.clear();
+      _chatScrollSavers.clear();
+      _readAckSent.clear();
+      _isAuthenticated = false;
+      _connectionStatus = ConnectionStatus.idle;
+      _connectionError = null;
+      notifyListeners();
+    } finally {
+      _loggingOut = false;
+    }
   }
+
+  /// `action: log_out` из сокета — тихий выход без подтверждения.
+  void _onForceLogOut() {
+    unawaited(logOut(sendToServer: false));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Устройства (device_list / device_del / device_del_all, как в Forum_ios)
+  // ---------------------------------------------------------------------------
+
+  String? _deviceUid;
+
+  /// UID текущего устройства (тот же, что в check_code / get_qr / log_in).
+  String? get deviceUid => _deviceUid;
+
+  Future<String> currentDeviceUid() async {
+    return _deviceUid ??= await DeviceIdService.getOrCreate();
+  }
+
+  /// WS `device_list` — активные сеансы пользователя.
+  Future<List<DeviceSession>> loadDevices() async {
+    await currentDeviceUid();
+    return _api.fetchDeviceList();
+  }
+
+  /// WS `device_del` — отключить устройство по uid.
+  Future<void> terminateDevice(String uid) => _api.deviceDel(uid);
+
+  /// WS `device_del_all` — завершить все сеансы, кроме текущего.
+  Future<void> terminateAllOtherSessions() => _api.deviceDelAll();
+
+  /// WS `check_qr` — авторизовать другое устройство по строке из его QR.
+  Future<void> authorizeByQr(String qr) => _api.checkQr(qr);
 
   Future<void> retryConnection() {
     _messagesLoadedFor.clear();
@@ -2357,6 +2408,7 @@ class AppState extends ChangeNotifier {
     _api.onStatusPush = null;
     _api.onMsgDelPush = null;
     _api.onAddLikePush = null;
+    _api.onForceLogOut = null;
     _api.onDisconnected = null;
     _api.dispose();
     super.dispose();

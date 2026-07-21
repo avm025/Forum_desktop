@@ -6,6 +6,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../api/forum_api_client.dart';
 import '../../models/auth_models.dart';
+import '../../services/auth_debug.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_colors.dart';
 import 'sms_code_screen.dart';
@@ -32,21 +33,21 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
   bool _loadingQr = true;
   bool _smsLoading = false;
   bool _completing = false;
+  bool _smsFlowActive = false;
+  int _sessionGen = 0;
+  Timer? _reconnectTimer;
 
   @override
   void initState() {
     super.initState();
     _api.onCheckQrAuth = _onCheckQr;
-    _api.onDisconnected = () {
-      if (!mounted || _completing) return;
-      setState(() => _error = 'Соединение закрыто. Обновляем QR…');
-      _startQrSession();
-    };
+    _api.onDisconnected = _onWsDisconnected;
     _startQrSession();
   }
 
   @override
   void dispose() {
+    _reconnectTimer?.cancel();
     _api.onCheckQrAuth = null;
     _api.onDisconnected = null;
     unawaited(_api.disconnect());
@@ -54,7 +55,20 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
     super.dispose();
   }
 
+  void _onWsDisconnected() {
+    if (!mounted || _completing || _smsFlowActive) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted || _completing || _smsFlowActive) return;
+      setState(() => _error = 'Соединение закрыто. Обновляем QR…');
+      _startQrSession();
+    });
+  }
+
   Future<void> _startQrSession() async {
+    final gen = ++_sessionGen;
+    _reconnectTimer?.cancel();
+    if (!mounted) return;
     setState(() {
       _loadingQr = true;
       _error = null;
@@ -63,29 +77,37 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
     try {
       // Онбординг: WS без JWT.
       await _api.connect();
+      if (!mounted || gen != _sessionGen || _smsFlowActive) return;
       final qr = await _api.requestQr();
-      if (!mounted) return;
+      if (!mounted || gen != _sessionGen || _smsFlowActive) return;
       setState(() {
         _qrUrl = qr;
         _loadingQr = false;
+        _error = null;
       });
     } on ForumApiException catch (e) {
-      if (!mounted) return;
+      if (!mounted || gen != _sessionGen) return;
       setState(() {
         _error = e.message;
         _loadingQr = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || gen != _sessionGen) return;
+      // Переподключение само вызовет новый get_qr — не шумим StateError.
+      final msg = e.toString();
+      if (msg.contains('отключ') || msg.contains('отменено')) {
+        setState(() => _loadingQr = true);
+        return;
+      }
       setState(() {
-        _error = e.toString();
+        _error = msg;
         _loadingQr = false;
       });
     }
   }
 
   Future<void> _onCheckQr(Map<String, dynamic> data) async {
-    if (_completing || !mounted) return;
+    if (_completing || !mounted || _smsFlowActive) return;
     final token = data['token']?.toString() ?? '';
     if (token.isEmpty) return;
     setState(() => _completing = true);
@@ -118,17 +140,26 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
 
     setState(() {
       _smsLoading = true;
+      _smsFlowActive = true;
       _error = null;
     });
+    _sessionGen++;
+    _reconnectTimer?.cancel();
+    try {
+      await _api.disconnect();
+    } catch (_) {}
+
     try {
       final result = await _api.requestSms(
         phone: phone,
         prefix: country.prefixWithPlus,
         prfxId: country.prfxId,
-        test: false,
+        test: AuthDebug.useTestSms,
       );
       if (!mounted) return;
-      if (result.hintText != null && result.hintText!.trim().isNotEmpty) {
+      if (!AuthDebug.enabled &&
+          result.hintText != null &&
+          result.hintText!.trim().isNotEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(result.hintText!)),
         );
@@ -140,6 +171,7 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
             country: country,
             smsId: result.id,
             hintText: result.hintText,
+            serverCode: AuthDebug.parseServerCode(result.hintText),
           ),
         ),
       );
@@ -150,7 +182,13 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
       if (!mounted) return;
       setState(() => _error = e.toString());
     } finally {
-      if (mounted) setState(() => _smsLoading = false);
+      if (mounted) {
+        setState(() {
+          _smsLoading = false;
+          _smsFlowActive = false;
+        });
+        _startQrSession();
+      }
     }
   }
 
@@ -173,49 +211,66 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
               child: Column(
                 children: [
                   Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        _QrCard(
-                          loading: _loadingQr || _completing,
-                          qrUrl: _qrUrl,
-                          onRefresh: _startQrSession,
-                        ),
-                        const SizedBox(height: 28),
-                        const _StepRow(
-                          number: 1,
-                          text: 'Откройте приложение на телефоне',
-                        ),
-                        const SizedBox(height: 14),
-                        const _StepRow(
-                          number: 2,
-                          text: 'Откройте Настройки > Авторизация по QR-коду',
-                        ),
-                        const SizedBox(height: 14),
-                        const _StepRow(
-                          number: 3,
-                          text:
-                              'Для подтверждения направьте камеру телефона на этот экран',
-                        ),
-                        if (_error != null) ...[
-                          const SizedBox(height: 16),
-                          Text(
-                            _error!,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Color(0xFFE5484D),
-                              fontSize: 13,
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final qrSize =
+                            (constraints.maxHeight * 0.48).clamp(160.0, 280.0);
+                        return SingleChildScrollView(
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              minHeight: constraints.maxHeight,
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                _QrCard(
+                                  size: qrSize,
+                                  loading: _loadingQr || _completing,
+                                  qrUrl: _qrUrl,
+                                  onRefresh: _startQrSession,
+                                ),
+                                const SizedBox(height: 20),
+                                const _StepRow(
+                                  number: 1,
+                                  text: 'Откройте приложение на телефоне',
+                                ),
+                                const SizedBox(height: 12),
+                                const _StepRow(
+                                  number: 2,
+                                  text:
+                                      'Откройте Настройки > Авторизация по QR-коду',
+                                ),
+                                const SizedBox(height: 12),
+                                const _StepRow(
+                                  number: 3,
+                                  text:
+                                      'Для подтверждения направьте камеру телефона на этот экран',
+                                ),
+                                if (_error != null) ...[
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    _error!,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Color(0xFFE5484D),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                           ),
-                        ],
-                      ],
+                        );
+                      },
                     ),
                   ),
+                  const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
                     height: 52,
                     child: FilledButton(
-                      onPressed: (_smsLoading || _completing) ? null : _startSms,
+                      onPressed:
+                          (_smsLoading || _completing) ? null : _startSms,
                       style: FilledButton.styleFrom(
                         backgroundColor: AppColors.purple,
                         disabledBackgroundColor:
@@ -254,11 +309,13 @@ class _QrLoginScreenState extends State<QrLoginScreen> {
 }
 
 class _QrCard extends StatelessWidget {
+  final double size;
   final bool loading;
   final String? qrUrl;
   final VoidCallback onRefresh;
 
   const _QrCard({
+    required this.size,
     required this.loading,
     required this.qrUrl,
     required this.onRefresh,
@@ -266,9 +323,12 @@ class _QrCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final qrInner = (size - 40).clamp(120.0, 240.0);
+    final logo = (size * 0.18).clamp(36.0, 52.0);
+
     return Container(
-      width: 280,
-      height: 280,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
@@ -295,7 +355,7 @@ class _QrCard extends StatelessWidget {
                     QrImageView(
                       data: qrUrl!,
                       version: QrVersions.auto,
-                      size: 240,
+                      size: qrInner,
                       backgroundColor: Colors.white,
                       eyeStyle: const QrEyeStyle(
                         eyeShape: QrEyeShape.square,
@@ -307,17 +367,17 @@ class _QrCard extends StatelessWidget {
                       ),
                     ),
                     Container(
-                      width: 52,
-                      height: 52,
+                      width: logo,
+                      height: logo,
                       decoration: BoxDecoration(
                         color: AppColors.lime,
                         shape: BoxShape.circle,
                         border: Border.all(color: Colors.white, width: 4),
                       ),
-                      child: const Icon(
+                      child: Icon(
                         Icons.key_rounded,
                         color: Colors.white,
-                        size: 26,
+                        size: logo * 0.5,
                       ),
                     ),
                   ],

@@ -6,11 +6,16 @@ import '../theme/app_theme.dart';
 import 'avatar_widget.dart';
 import 'profile_avatar_picker.dart';
 
-/// Аватар профиля с кнопкой смены фото.
+/// Аватар профиля с кнопкой «+» (как в Forum_ios, 32pt).
 class ProfileAvatarEditor extends StatelessWidget {
   final double size;
+  final double plusSize;
 
-  const ProfileAvatarEditor({super.key, this.size = 112});
+  const ProfileAvatarEditor({
+    super.key,
+    this.size = 112,
+    this.plusSize = 32,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -19,6 +24,7 @@ class ProfileAvatarEditor extends StatelessWidget {
     final profile = state.profile;
     final isDark = state.isDark;
     final uploading = state.profileAvatarUploading;
+    final pageBg = isDark ? p.bg1 : const Color(0xFFF4F5F7);
 
     return Stack(
       clipBehavior: Clip.none,
@@ -46,22 +52,26 @@ class ProfileAvatarEditor extends StatelessWidget {
             ),
           ),
         Positioned(
-          right: 0,
-          bottom: 0,
+          right: -2,
+          bottom: -2,
           child: Material(
-            color: p.purple,
+            color: pageBg,
             shape: const CircleBorder(),
-            elevation: 2,
             child: InkWell(
               customBorder: const CircleBorder(),
               onTap: uploading ? null : () => showProfileAvatarPicker(context),
-              child: SizedBox(
-                width: size * 0.32,
-                height: size * 0.32,
+              child: Container(
+                width: plusSize,
+                height: plusSize,
+                decoration: BoxDecoration(
+                  color: p.purple,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: pageBg, width: 3),
+                ),
                 child: Icon(
-                  Icons.camera_alt_rounded,
+                  Icons.add,
                   color: Colors.white,
-                  size: size * 0.17,
+                  size: plusSize * 0.45,
                 ),
               ),
             ),

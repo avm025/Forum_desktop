@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/auth_models.dart';
+import '../models/device_session.dart';
 import '../models/dialog_group.dart';
 import '../models/emoji_category.dart';
 import '../models/dialogs_list_view_model.dart';
@@ -57,6 +58,10 @@ typedef CheckQrAuthHandler = void Function(Map<String, dynamic> data);
 
 typedef WsVoidCallback = void Function();
 
+/// `action: "log_out"` в любом WS-сообщении — принудительный выход без
+/// подтверждения (устройство отвязано на сервере / device_del с другого устройства).
+typedef ForceLogOutHandler = void Function();
+
 /// Клиент Forum API.
 class ForumApiClient {
   WebSocketChannel? _channel;
@@ -71,9 +76,12 @@ class ForumApiClient {
   MsgDelPushHandler? onMsgDelPush;
   AddLikePushHandler? onAddLikePush;
   CheckQrAuthHandler? onCheckQrAuth;
+  ForceLogOutHandler? onForceLogOut;
   WsVoidCallback? onDisconnected;
 
   bool _suppressDisconnect = false;
+  /// Инвалидирует onDone/onError старого сокета после reconnect.
+  int _connectionGeneration = 0;
 
   bool get isConnected => _channel != null;
 
@@ -191,18 +199,32 @@ class ForumApiClient {
 
   Future<void> connect() async {
     await disconnect();
+    final generation = ++_connectionGeneration;
     ApiLogger.instance.logEvent('WS', 'Подключение ${ApiConfig.wsHost}');
     try {
       final channel = connectForumWebSocket(ApiConfig.wsUri);
       await awaitWebSocketReady(channel);
+      if (generation != _connectionGeneration) {
+        try {
+          await channel.sink.close();
+        } catch (_) {}
+        throw StateError('WebSocket подключение отменено');
+      }
       _channel = channel;
-      _subscription = _channel!.stream.listen(
+      _subscription = channel.stream.listen(
         _onMessage,
-        onError: (_) => _handleSocketClosed(),
-        onDone: _handleSocketClosed,
+        onError: (_) {
+          if (generation == _connectionGeneration) _handleSocketClosed();
+        },
+        onDone: () {
+          if (generation == _connectionGeneration) _handleSocketClosed();
+        },
       );
     } catch (e, st) {
-      _channel = null;
+      if (generation == _connectionGeneration) {
+        _channel = null;
+        _subscription = null;
+      }
       ApiLogger.instance.logEvent('WS', 'Handshake ошибка: $e\n$st');
       rethrow;
     }
@@ -219,12 +241,15 @@ class ForumApiClient {
 
   Future<void> disconnect() async {
     _suppressDisconnect = true;
-    await _subscription?.cancel();
+    _connectionGeneration++;
+    final subscription = _subscription;
+    final channel = _channel;
     _subscription = null;
-    try {
-      await _channel?.sink.close();
-    } catch (_) {}
     _channel = null;
+    await subscription?.cancel();
+    try {
+      await channel?.sink.close();
+    } catch (_) {}
     _failAll(StateError('WebSocket отключён'));
     _suppressDisconnect = false;
   }
@@ -236,6 +261,7 @@ class ForumApiClient {
     onMsgDelPush = null;
     onAddLikePush = null;
     onCheckQrAuth = null;
+    onForceLogOut = null;
     onDisconnected = null;
     _uploader.close();
     _http.close();
@@ -243,13 +269,84 @@ class ForumApiClient {
   }
 
   /// WS `get_qr` — URL для QR на экране онбординга.
+  /// `uid` регистрирует устройство до log_in (get_qr.md).
   Future<String> requestQr() async {
-    final resp = await sendWs({'type': 'get_qr'});
+    final uid = await DeviceIdService.getOrCreate();
+    final resp = await sendWs({
+      'type': 'get_qr',
+      'data': {'uid': uid},
+    });
     final qr = resp['qr']?.toString().trim() ?? '';
     if (qr.isEmpty) {
       throw ForumApiException('Пустой QR от сервера', payload: resp);
     }
     return qr;
+  }
+
+  /// WS `check_qr` — авторизация другого устройства по его QR
+  /// (`data.qr` — строка из QR на экране ожидающего устройства).
+  Future<void> checkQr(String qr) async {
+    final resp = await sendWs({
+      'type': 'check_qr',
+      'data': {'qr': qr},
+    });
+    if (resp['success'] != true) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Не удалось подтвердить QR-код',
+        payload: resp,
+      );
+    }
+  }
+
+  /// WS `device_list` — активные сеансы пользователя (device_list.md).
+  Future<List<DeviceSession>> fetchDeviceList() async {
+    final resp = await sendWs({
+      'type': 'device_list',
+      'data': const <String, dynamic>{},
+    });
+    if (resp['success'] != true) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Не удалось загрузить устройства',
+        payload: resp,
+      );
+    }
+    final data = resp['data'];
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((e) => DeviceSession.fromJson(Map<String, dynamic>.from(e)))
+        .whereType<DeviceSession>()
+        .toList();
+  }
+
+  /// WS `device_del` — завершить сеанс устройства по `uid`.
+  Future<void> deviceDel(String uid) async {
+    final resp = await sendWs({
+      'type': 'device_del',
+      'data': {'uid': uid},
+    });
+    if (resp['success'] != true) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Не удалось отключить устройство',
+        payload: resp,
+      );
+    }
+  }
+
+  /// WS `device_del_all` — завершить все сеансы, кроме текущего
+  /// (`data.uid` — устройство, которое оставить; device_del_all.md).
+  Future<void> deviceDelAll() async {
+    final uid = await DeviceIdService.getOrCreate();
+    final resp = await sendWs({
+      'type': 'device_del_all',
+      'data': {'uid': uid},
+    });
+    if (resp['success'] != true) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Не удалось завершить сеансы',
+        payload: resp,
+      );
+    }
   }
 
   /// HTTP `sms` — запрос кода (Bearer не нужен).
@@ -309,14 +406,17 @@ class ForumApiClient {
   }
 
   /// HTTP `check_code` — проверка кода и JWT.
+  /// `uid` обязателен: регистрирует/реактивирует `usr_device` (check_code.md).
   Future<CheckCodeResult> checkSmsCode({
     required String smsId,
     required String code,
   }) async {
+    final uid = await DeviceIdService.getOrCreate();
     final payload = {
       'type': 'check_code',
       'id': smsId,
       'code': code,
+      'uid': uid,
     };
     final body = jsonEncode(payload);
     ApiLogger.instance.logHttpSend('POST', ApiConfig.httpApiUrl, body);
@@ -689,6 +789,18 @@ class ForumApiClient {
       final map = Map<String, dynamic>.from(jsonDecode(text) as Map);
       final type = map['type']?.toString();
       if (type == null) return;
+
+      // `action: "log_out"` в любом сообщении — принудительный выход
+      // без подтверждения (log_out.md). Проверяем до обработки ошибок:
+      // сервер шлёт success:false вместе с action.
+      if (map['action']?.toString() == 'log_out') {
+        ApiLogger.instance.logWsReceive(type, map);
+        _completeWithError(
+          ForumApiException('Сеанс завершён на другом устройстве', payload: map),
+        );
+        onForceLogOut?.call();
+        return;
+      }
 
       if (map['success'] == false && map['message'] != null) {
         _completeWithError(

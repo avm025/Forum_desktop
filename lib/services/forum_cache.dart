@@ -77,6 +77,19 @@ class ForumCache {
     } catch (_) {}
   }
 
+  /// Полный wipe кэша при выходе (как `wipeAllLocalUserData` в Forum_ios).
+  Future<void> clearAll() async {
+    final dir = await _cacheDir();
+    if (dir == null) return;
+    try {
+      await for (final entity in dir.list()) {
+        try {
+          await entity.delete(recursive: true);
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
   Future<void> saveMessages(String dlgId, Map<String, dynamic> response) async {
     await _write('msgs_$dlgId.json', jsonEncode(response));
   }
