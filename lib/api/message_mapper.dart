@@ -79,8 +79,11 @@ class MessageMapper {
           size = MsgSize(files.first.widthValue, files.first.heightValue);
         }
       case 'file':
-        desc = bodyJson?['desc']?.toString() ?? bodyJson?['title']?.toString() ?? '';
+        // Подпись — только desc; сырой body JSON в чат не показываем
+        // (тайлы файлов уже рисуются отдельно).
+        desc = bodyJson?['desc']?.toString() ?? '';
         body = desc;
+        text = desc;
         files = _parseFiles(bodyJson?['files']);
         if (files.isEmpty && bodyJson != null) {
           files = [_fileFromMap(bodyJson)];

@@ -62,10 +62,29 @@ class _MessageItemState extends State<MessageItem> {
     return (w * _maxBubbleFraction).clamp(120.0, _maxBubbleWidthCap);
   }
 
-  String get _textValue =>
-      message.body.isNotEmpty ? message.body : message.text;
+  /// Текст подписи в пузыре. Для file/media не подставляем сырой JSON
+  /// обмена с сервером (`{"desc":"","files":[...]}`) — только caption.
+  String get _textValue {
+    if (message.isFile || (message.isImage && message.hasFiles)) {
+      final caption = message.desc.trim();
+      if (caption.isNotEmpty) return caption;
+      final body = message.body.trim();
+      if (body.isNotEmpty && !_isAttachmentPayloadJson(body)) return body;
+      return '';
+    }
+    return message.body.isNotEmpty ? message.body : message.text;
+  }
 
   bool get _hasText => _textValue.trim().isNotEmpty;
+
+  static bool _isAttachmentPayloadJson(String value) {
+    final t = value.trimLeft();
+    if (!t.startsWith('{')) return false;
+    return t.contains('"files"') ||
+        t.contains('"fname"') ||
+        t.contains('"fdir"') ||
+        (t.contains('"desc"') && t.contains('"kind"'));
+  }
 
   bool get _isPlainTextOnly =>
       _hasText &&
