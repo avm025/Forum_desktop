@@ -42,5 +42,7 @@ flutter:
   uses-material-design: true
 
 # Avoid jni FFI being pulled into Windows desktop builds via path_provider_android 2.3+.
+# flutter_webrtc >=1.5.2: Windows CMake extracts libwebrtc via REALPATH (not plugin symlink).
 dependency_overrides:
   path_provider_android: 2.2.17
+  flutter_webrtc: 1.5.2

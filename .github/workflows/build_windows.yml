@@ -2,6 +2,8 @@
 #
 # Actions → "Build Windows" → Run workflow → скачать artifact forum_app-windows
 #
+# windows-2022: на windows-latest новый CMake отказывается распаковывать
+# libwebrtc через .plugin_symlinks/flutter_webrtc.
 name: Build Windows
 
 on:
@@ -17,7 +19,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -36,6 +38,31 @@ jobs:
 
       - name: Dependencies
         run: flutter pub get
+
+      - name: Generate Windows build files
+        run: flutter build windows --config-only
+
+      - name: Materialize flutter_webrtc (avoid CMake symlink extract)
+        shell: pwsh
+        run: |
+          $link = "windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc"
+          if (-not (Test-Path $link)) {
+            Write-Host "No flutter_webrtc symlink (skip)"
+            exit 0
+          }
+          $item = Get-Item $link -Force
+          $target = $null
+          if ($item.LinkType) {
+            $target = $item.Target
+            if ($target -is [System.Array]) { $target = $target[0] }
+          }
+          if (-not $target -or -not (Test-Path $target)) {
+            Write-Host "Could not resolve symlink target; leaving as-is"
+            exit 0
+          }
+          Write-Host "Replacing symlink $link -> copy of $target"
+          Remove-Item $link -Force -Recurse -ErrorAction SilentlyContinue
+          Copy-Item -LiteralPath $target -Destination $link -Recurse -Force
 
       - name: Build Windows release
         shell: pwsh
