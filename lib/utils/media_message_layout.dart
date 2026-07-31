@@ -20,7 +20,7 @@ class MediaTileRect {
 /// Раскладка превью для 1–10 медиа-файлов в одном сообщении.
 class MediaMessageLayout {
   static const maxFiles = 10;
-  static const maxPreviewHeight = 384.0;
+  static const maxPreviewHeight = 560.0;
 
   final double totalWidth;
   final double totalHeight;
@@ -37,6 +37,86 @@ class MediaMessageLayout {
     final h = file.heightValue;
     if (w <= 0 || h <= 0) return 1;
     return w / h;
+  }
+
+  /// Ряды без пустот: каждая строка на всю [width], последний тайл ряда
+  /// забирает остаток пикселей (без щели справа).
+  static MediaMessageLayout justified({
+    required List<MediaFile> files,
+    required double width,
+    double gap = 2,
+    double targetRowHeight = 168,
+  }) {
+    final list = files.take(maxFiles).toList();
+    if (list.isEmpty) {
+      return const MediaMessageLayout(totalWidth: 0, totalHeight: 0, tiles: []);
+    }
+    if (list.length == 1) {
+      return _layout1(list.first, width, maxPreviewHeight);
+    }
+
+    final aspects = [
+      for (final f in list) _aspect(f).clamp(0.2, 5.0),
+    ];
+    final rows = <List<int>>[];
+    var row = <int>[];
+    var aspectSum = 0.0;
+
+    for (var i = 0; i < list.length; i++) {
+      final a = aspects[i];
+      final nextSum = aspectSum + a;
+      final gaps = row.isEmpty ? 0.0 : row.length * gap;
+      final rowWidthAtTarget = nextSum * targetRowHeight + gaps;
+      if (row.isNotEmpty && rowWidthAtTarget > width) {
+        rows.add(row);
+        row = <int>[i];
+        aspectSum = a;
+      } else {
+        row.add(i);
+        aspectSum = nextSum;
+      }
+    }
+    if (row.isNotEmpty) rows.add(row);
+
+    final tiles = List<MediaTileRect?>.filled(list.length, null);
+    var y = 0.0;
+    for (var r = 0; r < rows.length; r++) {
+      final indices = rows[r];
+      final gapsTotal = (indices.length - 1) * gap;
+      var sumA = 0.0;
+      for (final i in indices) {
+        sumA += aspects[i];
+      }
+      final usable = (width - gapsTotal).clamp(1.0, width);
+      // Высота из пропорций; при упоре в max — всё равно делим ширину без дыр.
+      final height = (usable / sumA).clamp(48.0, maxPreviewHeight);
+
+      var x = 0.0;
+      for (var k = 0; k < indices.length; k++) {
+        final i = indices[k];
+        final isLast = k == indices.length - 1;
+        final w = isLast
+            ? (width - x).clamp(1.0, width)
+            : (usable * (aspects[i] / sumA));
+        tiles[i] = MediaTileRect(
+          left: x,
+          top: y,
+          width: w,
+          height: height,
+          playIconSize: height < 96 ? 32 : 44,
+        );
+        x += w + gap;
+      }
+      y += height + (r == rows.length - 1 ? 0 : gap);
+    }
+
+    return MediaMessageLayout(
+      totalWidth: width,
+      totalHeight: y,
+      tiles: [
+        for (final t in tiles) t!,
+      ],
+    );
   }
 
   static MediaMessageLayout compute({

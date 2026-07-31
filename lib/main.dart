@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'calls/call_manager.dart';
 import 'services/api_logger.dart';
 import 'services/firebase_service.dart';
 import 'screens/auth/phone_login_screen.dart';
 import 'screens/home_screen.dart';
 import 'state/app_state.dart';
 import 'theme/app_colors.dart';
+import 'widgets/call/call_host_overlay.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,6 +33,7 @@ class ForumApp extends StatelessWidget {
             return state;
           },
         ),
+        ChangeNotifierProvider.value(value: CallManager.instance),
         ChangeNotifierProvider.value(value: ApiLogger.instance),
       ],
       child: Consumer<AppState>(
@@ -51,7 +54,9 @@ class ForumApp extends StatelessWidget {
                 data: MediaQuery.of(context).copyWith(
                   textScaler: TextScaler.linear(state.textScaleFactor),
                 ),
-                child: child ?? const SizedBox.shrink(),
+                child: CallHostOverlay(
+                  child: child ?? const SizedBox.shrink(),
+                ),
               );
             },
             home: !state.authReady

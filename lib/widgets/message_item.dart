@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -11,18 +12,21 @@ import '../api/msg_list_cursors.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import 'avatar_widget.dart';
+import 'call_message_bubble.dart';
 import 'chat_attachment_viewer.dart';
 import 'chat_scroll_scope.dart';
 import 'delete_message_dialog.dart';
+import 'document_attachment_list.dart';
 import 'emoji_reactions.dart';
 import 'forward_dialog_picker.dart';
 import 'location_preview.dart';
 import 'media_grid.dart';
 import '../utils/media_message_layout.dart';
-import '../utils/file_saver.dart';
+import '../utils/media_file_loader.dart';
 import '../utils/media_file_url.dart';
 import 'file_row_tile.dart';
 import 'message_actions_bar.dart';
+import 'message_status_list_sheet.dart';
 import 'reply_preview.dart';
 import 'status_ticks.dart';
 import 'voice_message.dart';
@@ -54,8 +58,8 @@ class _MessageItemState extends State<MessageItem> {
   static const double _avatarGap = 8;
   static const double _bubbleRadius = 14;
   static const double _bubbleRadiusSmall = 4;
-  static const double _maxBubbleFraction = 0.78;
-  static const double _maxBubbleWidthCap = 660;
+  static const double _maxBubbleFraction = 0.88;
+  static const double _maxBubbleWidthCap = 980;
 
   double _maxBubbleWidth(BuildContext context) {
     final w = MediaQuery.sizeOf(context).width;
@@ -92,6 +96,7 @@ class _MessageItemState extends State<MessageItem> {
       !message.hasReactions &&
       !message.isVoice &&
       !message.isLocation &&
+      !message.isCall &&
       !(message.isImage && message.hasFiles) &&
       !message.isFile;
 
@@ -110,8 +115,13 @@ class _MessageItemState extends State<MessageItem> {
     final bubble = GestureDetector(
       key: _bubbleKey,
       behavior: HitTestBehavior.opaque,
-      onTap: () => MessageContextMenuController.instance
-          .handleBubbleTap(_bubbleKey),
+      onTap: () {
+        if (message.isCall) {
+          _callbackFromCallMessage(context);
+          return;
+        }
+        MessageContextMenuController.instance.handleBubbleTap(_bubbleKey);
+      },
       onSecondaryTapUp: (details) =>
           _showActions(globalPosition: details.globalPosition),
       onLongPress: _showActions,
@@ -143,6 +153,7 @@ class _MessageItemState extends State<MessageItem> {
                 message: message,
                 onAccent: onAccent,
                 maxWidth: innerMaxWidth,
+                currentUserId: state.profile?.id,
                 onTap: message.prn_id.trim().isNotEmpty
                     ? () => ChatScrollScope.maybeOf(context)
                         ?.scrollToMessage(message.prn_id)
@@ -152,8 +163,9 @@ class _MessageItemState extends State<MessageItem> {
             if (message.hasReactions)
               EmojiReactions(
                 reactions: message.emoji,
-                currentUserName: context.read<AppState>().profile?.name ?? '',
-                currentUserId: context.read<AppState>().profile?.id ?? '',
+                currentUserName: state.profile?.name ?? '',
+                currentUserId: state.profile?.id ?? '',
+                onAccent: onAccent,
                 onReactionTap: _canReact ? _onReactionTap : null,
               ),
             if (!_isPlainTextOnly) _footer(p, onAccent, alignEnd: _useWideFooter),
@@ -197,6 +209,7 @@ class _MessageItemState extends State<MessageItem> {
   bool get _useWideFooter =>
       message.isVoice ||
       message.isLocation ||
+      message.isCall ||
       (message.isImage && message.hasFiles) ||
       message.isFile;
 
@@ -244,30 +257,28 @@ class _MessageItemState extends State<MessageItem> {
 
   void _onReactionTap(String emoji, {required bool remove}) {
     if (!_canReact) return;
-    context.read<AppState>().toggleReaction(message, emoji, remove: remove);
+    unawaited(
+      context.read<AppState>().toggleReaction(message, emoji, remove: remove),
+    );
   }
 
   void _pickReaction(String emoji) {
     if (!_canReact) return;
-    context.read<AppState>().toggleReaction(message, emoji);
+    unawaited(context.read<AppState>().toggleReaction(message, emoji));
   }
 
   Future<void> _openFile(BuildContext context, MediaFile file) async {
     await ChatAttachmentViewer.show(context, file);
   }
 
-  Future<void> _saveFile(BuildContext context, MediaFile file) async {
-    final result = await FileSaver.save(file);
-    if (!context.mounted || result == FileSaveResult.cancelled) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          result == FileSaveResult.saved
-              ? 'Файл сохранён'
-              : 'Не удалось сохранить файл',
-        ),
-      ),
-    );
+  /// Документы: открытие только если файл уже загружен («Загрузить»).
+  Future<void> _openDocumentIfDownloaded(
+    BuildContext context,
+    MediaFile file,
+  ) async {
+    if (!await MediaFileLoader.isDownloaded(file)) return;
+    if (!context.mounted) return;
+    await ChatAttachmentViewer.show(context, file);
   }
 
   MediaFile _legacyMediaFile() {
@@ -295,24 +306,75 @@ class _MessageItemState extends State<MessageItem> {
   }
 
   Future<void> _showActions({Offset? globalPosition}) async {
-    final copyText = _copyText;
+    final copyText = message.isCall ? null : _copyText;
     final appState = context.read<AppState>();
+    final dialog = appState.selectedDialog;
+    final isGroup = dialog?.isGrp == true;
+    final msgId = appState.serverMessageId(message);
+    final dlgId = dialog?.id?.trim() ?? '';
+    final showViews = message.my &&
+        message.status >= 2 &&
+        msgId != null &&
+        dlgId.isNotEmpty &&
+        dlgId != '0';
+
     await showMessageActions(
       context: context,
       anchorKey: _bubbleKey,
       globalPosition: globalPosition,
-      reactions: _canReact ? appState.quickReactions : const [],
-      onReaction: _canReact ? _pickReaction : null,
+      reactions: message.isCall || !_canReact
+          ? const []
+          : appState.quickReactions,
+      onReaction: message.isCall || !_canReact ? null : _pickReaction,
+      onCall: message.isCall
+          ? () => _callbackFromCallMessage(context)
+          : null,
       onReply: () => appState.setReplyTo(message),
-      onForward: ForwardMapper.canForward(message) ? () => _forward(context) : null,
+      onForward: message.isCall
+          ? null
+          : (ForwardMapper.canForward(message)
+              ? () => _forward(context)
+              : null),
       onCopy: copyText == null
           ? null
           : () => Clipboard.setData(ClipboardData(text: copyText)),
-      onOpen: _canOpen && message.files.isNotEmpty
-          ? () => _openFile(context, message.files.first)
-          : null,
+      onOpen: message.isCall
+          ? null
+          : (_canOpen && message.files.isNotEmpty
+              ? () => _openFile(context, message.files.first)
+              : null),
       onDelete: () => _confirmDelete(context),
+      readViews: showViews
+          ? MsgReadViewsConfig(
+              isGroup: isGroup,
+              load: () => appState.fetchMsgReadList(
+                dlgId: dlgId,
+                msgId: msgId,
+              ),
+              avatarColors: (entry) {
+                final id = entry.colAvaId;
+                if (id == null) return null;
+                final palette = appState.database.avatarById(id);
+                if (palette == null) return null;
+                return palette
+                    .hexForDark(appState.isDark)
+                    .map((h) => h.startsWith('#') ? h : '#$h')
+                    .toList();
+              },
+            )
+          : null,
+      onViews: isGroup
+          ? (entries) {
+              if (!context.mounted) return;
+              MessageStatusListSheet.show(context, entries: entries);
+            }
+          : null,
     );
+  }
+
+  Future<void> _callbackFromCallMessage(BuildContext context) async {
+    final video = message.callBody?.isVideo ?? false;
+    await context.read<AppState>().startCallFromChat(video: video);
   }
 
   Future<void> _forward(BuildContext context) async {
@@ -349,6 +411,24 @@ class _MessageItemState extends State<MessageItem> {
     bool onAccent,
     double innerMaxWidth,
   ) {
+    if (message.isCall) {
+      final state = context.read<AppState>();
+      final display = message.callDisplay(currentUserId: state.profile?.id);
+      if (display == null) {
+        return Text(
+          message.desc.isNotEmpty ? message.desc : 'Вызов',
+          style: TextStyle(
+            color: onAccent ? Colors.white : p.text1,
+            fontSize: 15,
+          ),
+        );
+      }
+      return CallMessageBubble(
+        display: display,
+        onAccent: onAccent,
+        maxWidth: innerMaxWidth,
+      );
+    }
     if (message.isVoice) {
       return VoiceMessage(message: message, onAccent: onAccent);
     }
@@ -363,8 +443,6 @@ class _MessageItemState extends State<MessageItem> {
           MediaGrid(
             files: message.files,
             maxWidth: innerMaxWidth,
-            albumLandscape: message.size.width > message.size.height ||
-                mediaAlbumIsLandscape(message.files),
             onFileTap: (file) => _openFile(context, file),
           ),
           if (_hasText)
@@ -395,26 +473,14 @@ class _MessageItemState extends State<MessageItem> {
       return _legacyFileTile(p, onAccent);
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (var i = 0; i < files.length; i++) ...[
-          if (i > 0) const SizedBox(height: 8),
-          FileRowTile(
-            file: files[i],
-            onAccent: onAccent,
-            maxWidth: innerMaxWidth,
-            onTap: () => _openFile(context, files[i]),
-            onDownload: () => _saveFile(context, files[i]),
-          ),
-        ],
-        if (_hasText)
-          Padding(
-            padding: EdgeInsets.only(top: files.isNotEmpty ? 6 : 0),
-            child: _textWithFooter(p, onAccent, innerMaxWidth),
-          ),
-      ],
+    return DocumentAttachmentList(
+      files: files,
+      onAccent: onAccent,
+      maxWidth: innerMaxWidth,
+      onOpen: (file) => _openDocumentIfDownloaded(context, file),
+      footer: _hasText
+          ? _textWithFooter(p, onAccent, innerMaxWidth)
+          : null,
     );
   }
 
@@ -504,8 +570,7 @@ class _MessageItemState extends State<MessageItem> {
       file: file,
       onAccent: onAccent,
       maxWidth: 260,
-      onTap: () => _openFile(context, file),
-      onDownload: () => _saveFile(context, file),
+      onTap: () => _openDocumentIfDownloaded(context, file),
     );
   }
 }

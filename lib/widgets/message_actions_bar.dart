@@ -3,12 +3,28 @@ import 'dart:math' show max;
 
 import 'package:flutter/material.dart';
 
+import '../models/msg_read_entry.dart';
 import '../models/telegram_reactions.dart';
 import '../theme/app_theme.dart';
+import '../utils/msg_read_display.dart';
+import 'avatar_widget.dart';
 
 double _clampRange(double value, double min, double max) {
   if (max < min) return min;
   return value.clamp(min, max);
+}
+
+/// Конфиг пункта «просмотры» в контекстном меню (`msg_read_list`).
+class MsgReadViewsConfig {
+  final bool isGroup;
+  final Future<List<MsgReadEntry>> Function() load;
+  final List<String>? Function(MsgReadEntry entry)? avatarColors;
+
+  const MsgReadViewsConfig({
+    required this.isGroup,
+    required this.load,
+    this.avatarColors,
+  });
 }
 
 /// Пункт контекстного меню сообщения (как в Telegram Desktop).
@@ -73,10 +89,11 @@ class MessageContextMenuController {
     List<String> reactions = const [],
     void Function(String emoji)? onReaction,
     Offset? globalPosition,
+    MsgReadViewsConfig? readViews,
   }) async {
     close();
 
-    if (actions.isEmpty && reactions.isEmpty) return null;
+    if (actions.isEmpty && reactions.isEmpty && readViews == null) return null;
 
     final position = globalPosition ?? _bubbleGlobalPosition(anchorKey);
     if (position == Offset.zero && globalPosition == null) return null;
@@ -95,6 +112,7 @@ class MessageContextMenuController {
         onDismiss: () => close(),
         onStateReady: (state) => _state = state,
         onRebuild: _rebuildOverlay,
+        readViews: readViews,
       ),
     );
 
@@ -113,6 +131,7 @@ class _MessageContextMenuOverlay extends StatefulWidget {
   final VoidCallback onDismiss;
   final void Function(_MessageContextMenuOverlayState state) onStateReady;
   final VoidCallback onRebuild;
+  final MsgReadViewsConfig? readViews;
 
   const _MessageContextMenuOverlay({
     required this.anchorKey,
@@ -124,6 +143,7 @@ class _MessageContextMenuOverlay extends StatefulWidget {
     required this.onDismiss,
     required this.onStateReady,
     required this.onRebuild,
+    this.readViews,
   });
 
   @override
@@ -207,12 +227,14 @@ class _MessageContextMenuOverlayState extends State<_MessageContextMenuOverlay> 
         : _expanded
             ? (widget.reactions.length / emojiPerRow).ceil()
             : 1;
-    final actionsHeight = widget.actions.isEmpty
+    final actionsHeight = (widget.actions.isEmpty && widget.readViews == null)
         ? 0.0
-        : widget.actions.length * actionHeight +
+        : (widget.actions.length + (widget.readViews != null ? 1 : 0)) *
+                actionHeight +
             (widget.actions.any((a) => a.destructive) ? 8 : 0) +
             8;
-    final gap = widget.reactions.isNotEmpty && widget.actions.isNotEmpty
+    final gap = widget.reactions.isNotEmpty &&
+            (widget.actions.isNotEmpty || widget.readViews != null)
         ? blockGap
         : 0.0;
 
@@ -333,9 +355,10 @@ class _MessageContextMenuOverlayState extends State<_MessageContextMenuOverlay> 
                     ),
                   ),
                 ),
-              if (widget.reactions.isNotEmpty && widget.actions.isNotEmpty)
+              if (widget.reactions.isNotEmpty &&
+                  (widget.actions.isNotEmpty || widget.readViews != null))
                 const SizedBox(height: blockGap),
-              if (widget.actions.isNotEmpty)
+              if (widget.actions.isNotEmpty || widget.readViews != null)
                 Material(
                   color: p.bg2,
                   elevation: 16,
@@ -351,6 +374,12 @@ class _MessageContextMenuOverlayState extends State<_MessageContextMenuOverlay> 
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        if (widget.readViews != null)
+                          _MsgReadViewsTile(
+                            config: widget.readViews!,
+                            palette: p,
+                            onOpenList: () => widget.onAction('views'),
+                          ),
                         for (var i = 0; i < widget.actions.length; i++)
                           _ActionTile(
                             action: widget.actions[i],
@@ -639,19 +668,193 @@ Offset _bubbleGlobalPosition(GlobalKey anchorKey) {
   );
 }
 
+class _MsgReadViewsTile extends StatefulWidget {
+  final MsgReadViewsConfig config;
+  final ForumPalette palette;
+  final VoidCallback onOpenList;
+
+  const _MsgReadViewsTile({
+    required this.config,
+    required this.palette,
+    required this.onOpenList,
+  });
+
+  @override
+  State<_MsgReadViewsTile> createState() => _MsgReadViewsTileState();
+}
+
+class _MsgReadViewsTileState extends State<_MsgReadViewsTile>
+    with SingleTickerProviderStateMixin {
+  bool _loading = true;
+  List<MsgReadEntry> _entries = const [];
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final list = await widget.config.load();
+      if (!mounted) return;
+      setState(() {
+        _entries = list;
+        _loading = false;
+      });
+      _pulse.stop();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _entries = const [];
+        _loading = false;
+      });
+      _pulse.stop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.palette;
+    final canOpen = widget.config.isGroup && !_loading;
+    final label = _loading
+        ? null
+        : (widget.config.isGroup
+            ? MsgReadDisplay.viewsLabel(_entries.length)
+            : MsgReadDisplay.privateMenuLabel(_entries));
+
+    return InkWell(
+      onTap: canOpen ? widget.onOpenList : null,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            Icon(Icons.done_all_rounded, size: 20, color: p.lime),
+            const SizedBox(width: 14),
+            Expanded(
+              child: _loading
+                  ? FadeTransition(
+                      opacity: Tween(begin: 0.35, end: 0.85).animate(_pulse),
+                      child: Container(
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: p.text3.withValues(alpha: 0.35),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                      ),
+                    )
+                  : Text(
+                      label ?? '',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: p.text1,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+            ),
+            if (widget.config.isGroup) ...[
+              const SizedBox(width: 8),
+              if (_loading)
+                FadeTransition(
+                  opacity: Tween(begin: 0.35, end: 0.85).animate(_pulse),
+                  child: SizedBox(
+                    width: 54,
+                    height: 22,
+                    child: Stack(
+                      children: [
+                        for (var i = 0; i < 3; i++)
+                          Positioned(
+                            left: i * 14.0,
+                            child: Container(
+                              width: 22,
+                              height: 22,
+                              decoration: BoxDecoration(
+                                color: p.text3.withValues(alpha: 0.35),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                )
+              else if (_entries.isNotEmpty)
+                SizedBox(
+                  width: 14.0 * (_entries.take(3).length - 1).clamp(0, 2) + 22,
+                  height: 22,
+                  child: Stack(
+                    children: [
+                      for (var i = 0; i < _entries.take(3).length; i++)
+                        Positioned(
+                          left: i * 14.0,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: p.bg2, width: 1.5),
+                            ),
+                            child: AvatarWidget(
+                              name: _entries[i].name.isNotEmpty
+                                  ? _entries[i].name
+                                  : '?',
+                              avatarUrl: _entries[i].avatarUrl,
+                              avatarColor:
+                                  widget.config.avatarColors?.call(_entries[i]),
+                              size: 22,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              if (canOpen) ...[
+                const SizedBox(width: 4),
+                Icon(Icons.chevron_right_rounded, size: 18, color: p.text3),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 Future<void> showMessageActions({
   required BuildContext context,
   required GlobalKey anchorKey,
   required VoidCallback onReply,
+  VoidCallback? onCall,
   VoidCallback? onForward,
   VoidCallback? onCopy,
   VoidCallback? onOpen,
   VoidCallback? onDelete,
+  MsgReadViewsConfig? readViews,
+  void Function(List<MsgReadEntry> entries)? onViews,
   List<String> reactions = const [],
   void Function(String emoji)? onReaction,
   Offset? globalPosition,
 }) async {
+  List<MsgReadEntry> loadedViews = const [];
+
   final actions = <MessageContextAction>[
+    if (onCall != null)
+      const MessageContextAction(
+        id: 'call',
+        label: 'Позвонить',
+        icon: Icons.phone_rounded,
+      ),
     const MessageContextAction(
       id: 'reply',
       label: 'Ответить',
@@ -691,9 +894,23 @@ Future<void> showMessageActions({
     reactions: onReaction != null ? reactions : const [],
     onReaction: onReaction,
     globalPosition: globalPosition,
+    readViews: readViews == null
+        ? null
+        : MsgReadViewsConfig(
+            isGroup: readViews.isGroup,
+            avatarColors: readViews.avatarColors,
+            load: () async {
+              loadedViews = await readViews.load();
+              return loadedViews;
+            },
+          ),
   );
 
   switch (selected) {
+    case 'views':
+      onViews?.call(loadedViews);
+    case 'call':
+      onCall?.call();
     case 'reply':
       onReply();
     case 'forward':

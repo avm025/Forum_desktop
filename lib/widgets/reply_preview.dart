@@ -10,6 +10,7 @@ class ReplyPreview extends StatelessWidget {
   final bool onAccent;
   final double? maxWidth;
   final VoidCallback? onTap;
+  final String? currentUserId;
 
   const ReplyPreview({
     super.key,
@@ -17,6 +18,7 @@ class ReplyPreview extends StatelessWidget {
     this.onAccent = false,
     this.maxWidth,
     this.onTap,
+    this.currentUserId,
   });
 
   static const _textHeight = 40.0;
@@ -35,7 +37,8 @@ class ReplyPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final preview = _isRepost ? '' : message.replyPreviewText;
+    final preview =
+        _isRepost ? '' : message.replyPreviewTextFor(currentUserId);
     final name = message.prn_fr_name.trim().isNotEmpty
         ? message.prn_fr_name.trim()
         : 'Сообщение';

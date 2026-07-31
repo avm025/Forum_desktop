@@ -44,6 +44,16 @@ class ApiConfig {
         'Key': apiKey,
       };
 
+  /// Control-plane WebSocket для звонков (Forum CallModule / SignalingClient).
+  /// LiveKit URL/JWT приходят в событии `call.token`.
+  static const String callSignalingWs = 'wss://4um.me:8088/ws';
+
+  /// Auth только сообщением `{"type":"auth","payload":{"token":...}}` → `auth.ok`.
+  static Uri callSignalingUriForToken(String sessionToken) {
+    // Query/Bearer не авторизуют этот сервис — токен в payload после handshake.
+    return Uri.parse(callSignalingWs);
+  }
+
   /// HTTP без Bearer: `sms`, `check_code`, `database`.
   static Map<String, String> get openHttpHeaders => {
         'Content-Type': 'application/json; charset=utf-8',

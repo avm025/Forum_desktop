@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 import 'folder_chat_picker.dart';
+import 'new_message_picker.dart';
 
 /// Пункты меню «+» в шапке списка чатов.
 enum CreateChatMenuAction {
@@ -83,6 +84,7 @@ class CreateChatMenu {
       case CreateChatMenuAction.folder:
         await FolderChatPicker.openCreate(context);
       case CreateChatMenuAction.message:
+        await NewMessagePicker.open(context);
       case CreateChatMenuAction.group:
       case CreateChatMenuAction.aiChat:
         ScaffoldMessenger.of(context).showSnackBar(

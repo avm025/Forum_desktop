@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../models/dialogs_list_view_model.dart';
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
 import '../utils/emoticon_replacer.dart';
@@ -20,11 +21,16 @@ class OutgoingMessagePayload {
   }
 
   /// Синхронная сборка payload, если не нужен повторный upload.
+  ///
+  /// При [toId] (новый контакт, `dlg_id == "0"`) поле `dlg_id` не кладётся.
   static Map<String, dynamic>? build({
     required MessageViewModel message,
     required String dlgId,
+    String? toId,
   }) {
     if (message.repost && message.prn_id.trim().isNotEmpty) {
+      // Репост в новый контакт не поддерживаем — нужен реальный dlg_id.
+      if (toId != null && toId.trim().isNotEmpty) return null;
       return ForwardMapper.buildPayload(
         source: message,
         dlgId: dlgId,
@@ -35,16 +41,32 @@ class OutgoingMessagePayload {
 
     switch (_serverType(message)) {
       case 'txt':
-        return _text(message, dlgId);
+        return _text(message, dlgId: dlgId, toId: toId);
       case 'media':
         if (!_filesReady(message.files)) return null;
-        return _media(message, dlgId);
+        return _media(message, dlgId: dlgId, toId: toId);
       case 'file':
         if (!_filesReady(message.files)) return null;
-        return _file(message, dlgId);
+        return _file(message, dlgId: dlgId, toId: toId);
       default:
         return null;
     }
+  }
+
+  static Map<String, dynamic>? buildForDialog({
+    required MessageViewModel message,
+    required DialogsListViewModel dialog,
+  }) {
+    if (dialog.isNewContactWithoutDialog) {
+      final toId = dialog.usr_id?.trim() ?? '';
+      if (toId.isEmpty) return null;
+      return build(message: message, dlgId: '', toId: toId);
+    }
+    final dlgId = dialog.id?.trim() ?? '';
+    if (dlgId.isEmpty || DialogsListViewModel.isPlaceholderDlgId(dlgId)) {
+      return null;
+    }
+    return build(message: message, dlgId: dlgId);
   }
 
   static bool needsUpload(MessageViewModel message) {
@@ -81,46 +103,71 @@ class OutgoingMessagePayload {
     }
   }
 
-  static Map<String, dynamic> _text(MessageViewModel message, String dlgId) {
+  static void _applyTarget(
+    Map<String, dynamic> payload, {
+    required String dlgId,
+    String? toId,
+  }) {
+    final tid = toId?.trim() ?? '';
+    if (tid.isNotEmpty) {
+      payload['to_id'] = tid;
+      return;
+    }
+    payload['dlg_id'] = dlgId;
+  }
+
+  static Map<String, dynamic> _text(
+    MessageViewModel message, {
+    required String dlgId,
+    String? toId,
+  }) {
     final body = EmoticonReplacer.replace(
       (message.body.trim().isNotEmpty ? message.body : message.text).trim(),
     );
     final payload = <String, dynamic>{
       'type': 'txt',
       'hash': _hash(message),
-      'dlg_id': dlgId,
       'ai': message.ai,
       'body': body,
     };
+    _applyTarget(payload, dlgId: dlgId, toId: toId);
     final prnId = message.prn_id.trim();
     if (prnId.isNotEmpty) payload['prn_id'] = prnId;
     return payload;
   }
 
-  static Map<String, dynamic> _media(MessageViewModel message, String dlgId) {
+  static Map<String, dynamic> _media(
+    MessageViewModel message, {
+    required String dlgId,
+    String? toId,
+  }) {
     final cap = EmoticonReplacer.replace(
       (message.desc.trim().isNotEmpty
               ? message.desc
               : (message.body.trim().isNotEmpty ? message.body : message.text))
           .trim(),
     );
-    return {
+    final payload = <String, dynamic>{
       'type': 'media',
       'hash': _hash(message),
-      'dlg_id': dlgId,
       'ai': message.ai,
       'body': jsonEncode({
         'desc': cap,
         'files': message.files.map(_mediaFileEntry).toList(),
       }),
     };
+    _applyTarget(payload, dlgId: dlgId, toId: toId);
+    return payload;
   }
 
-  static Map<String, dynamic> _file(MessageViewModel message, String dlgId) {
-    return {
+  static Map<String, dynamic> _file(
+    MessageViewModel message, {
+    required String dlgId,
+    String? toId,
+  }) {
+    final payload = <String, dynamic>{
       'type': 'file',
       'hash': _hash(message),
-      'dlg_id': dlgId,
       'ai': message.ai,
       'body': jsonEncode({
         'desc': message.desc.trim(),
@@ -139,6 +186,8 @@ class OutgoingMessagePayload {
             .toList(),
       }),
     };
+    _applyTarget(payload, dlgId: dlgId, toId: toId);
+    return payload;
   }
 
   static Map<String, String> _mediaFileEntry(MediaFile file) {

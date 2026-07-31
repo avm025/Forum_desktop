@@ -11,7 +11,9 @@ import '../models/dialogs_list_view_model.dart';
 import '../models/message_view_model.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/attachment_selection.dart';
 import 'cached_forum_image.dart';
+import 'chat_drop_target.dart';
 import 'chat_header.dart';
 import 'chat_scroll_scope.dart';
 import 'date_separator.dart';
@@ -1037,6 +1039,7 @@ class _ChatViewState extends State<ChatView> {
           ColoredBox(color: p.bg1),
         ChatScrollScope(
         scrollToMessage: _scrollToMessage,
+        child: ChatDropTarget(
         child: Column(
         children: [
           ChatHeader(dialog: dialog, showBack: widget.showBack),
@@ -1089,50 +1092,55 @@ class _ChatViewState extends State<ChatView> {
                             opacity: _initialScrollSettled ? 1 : 0,
                             child: IgnorePointer(
                               ignoring: !_initialScrollSettled,
-                              child: ScrollConfiguration(
-                                behavior: ScrollConfiguration.of(context)
-                                    .copyWith(scrollbars: false),
-                                child: ListView.builder(
+                              child: Listener(
+                                behavior: HitTestBehavior.translucent,
+                                onPointerDown: (_) =>
+                                    AttachmentSelection.clearIfOutside(),
+                                child: Scrollbar(
                                   controller: _sc,
-                                  primary: false,
-                                  scrollCacheExtent:
-                                      const ScrollCacheExtent.pixels(2400),
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 8,
-                                  ),
-                                  itemCount: topPad + entries.length,
-                                  itemBuilder: (context, index) {
-                                  if (loadingOlder && index == 0) {
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          vertical: 12),
-                                      child: Center(
-                                        child: SizedBox(
-                                          width: 22,
-                                          height: 22,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: p.purple,
+                                  thumbVisibility: true,
+                                  child: ListView.builder(
+                                    controller: _sc,
+                                    primary: false,
+                                    scrollCacheExtent:
+                                        const ScrollCacheExtent.pixels(2400),
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
+                                    ),
+                                    itemCount: topPad + entries.length,
+                                    itemBuilder: (context, index) {
+                                      if (loadingOlder && index == 0) {
+                                        return Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                              vertical: 12),
+                                          child: Center(
+                                            child: SizedBox(
+                                              width: 22,
+                                              height: 22,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: p.purple,
+                                              ),
+                                            ),
                                           ),
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                  final entry = entries[index - topPad];
-                                  return switch (entry) {
-                                    _DateEntry(:final label) =>
-                                      DateSeparator(label: label),
-                                    _MessageEntry(:final message) =>
-                                      MessageItem(
-                                        key: _keyForMessage(message),
-                                        message: message,
-                                        isGroupChat: dialog.isGrp,
-                                      ),
-                                  };
-                                },
+                                        );
+                                      }
+                                      final entry = entries[index - topPad];
+                                      return switch (entry) {
+                                        _DateEntry(:final label) =>
+                                          DateSeparator(label: label),
+                                        _MessageEntry(:final message) =>
+                                          MessageItem(
+                                            key: _keyForMessage(message),
+                                            message: message,
+                                            isGroupChat: dialog.isGrp,
+                                          ),
+                                      };
+                                    },
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
                           ),
                           if (!_initialScrollSettled)
                             ColoredBox(color: p.bg1),
@@ -1145,6 +1153,7 @@ class _ChatViewState extends State<ChatView> {
           ),
           const MessageInput(),
         ],
+      ),
       ),
       ),
       ],

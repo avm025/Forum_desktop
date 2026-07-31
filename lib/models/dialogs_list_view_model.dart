@@ -56,4 +56,17 @@ class DialogsListViewModel {
 
   bool get isPinned => pin > 0;
   bool get hasUnread => unread > 0;
+
+  /// Плейсхолдер отсутствия диалога (`new_contact_dlg.md`).
+  static bool isPlaceholderDlgId(String? id) {
+    final s = (id ?? '').trim();
+    return s.isEmpty || s == '0';
+  }
+
+  /// Зарегистрированный контакт без личного чата: `id == "0"`, есть `usr_id`.
+  bool get isNewContactWithoutDialog =>
+      isPlaceholderDlgId(id) &&
+      (usr_id?.trim().isNotEmpty ?? false) &&
+      !isGrp &&
+      !fav;
 }

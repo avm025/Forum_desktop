@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/chat_type.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
@@ -13,9 +14,12 @@ class ChatHeader extends StatelessWidget {
 
   const ChatHeader({super.key, required this.dialog, this.showBack = false});
 
+  bool get _isGroup =>
+      dialog.isGrp || dialog.chatType == ChatType.groupChat;
+
   String get _subtitle {
     if (dialog.online) return 'в сети';
-    if (dialog.isGrp) {
+    if (_isGroup) {
       final info = dialog.groupAditionalInfo;
       if (info?.desc != null && info!.desc!.isNotEmpty) return info.desc!;
       return 'группа';
@@ -26,6 +30,15 @@ class ChatHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
+    final state = context.watch<AppState>();
+    final typing = state.chatTypingLabel;
+    final subtitle = (typing != null && typing.isNotEmpty) ? typing : _subtitle;
+    final subtitleColor = typing != null && typing.isNotEmpty
+        ? p.purple
+        : (dialog.online ? p.lime : p.text2);
+    final canCall = !dialog.fav &&
+        (_isGroup || (dialog.usr_id?.trim().isNotEmpty ?? false));
+
     return Container(
       height: 64,
       decoration: BoxDecoration(
@@ -64,15 +77,44 @@ class ChatHeader extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  _subtitle,
+                  subtitle,
                   style: TextStyle(
-                    color: dialog.online ? p.lime : p.text2,
+                    color: subtitleColor,
                     fontSize: 12,
                   ),
                 ),
               ],
             ),
           ),
+          if (canCall) ...[
+            if (_isGroup) ...[
+              IconButton(
+                tooltip: 'Групповой аудиозвонок',
+                onPressed: () =>
+                    context.read<AppState>().startCallFromChat(video: false),
+                icon: Icon(Icons.groups_outlined, color: p.text1, size: 24),
+              ),
+              IconButton(
+                tooltip: 'Групповой видеозвонок',
+                onPressed: () =>
+                    context.read<AppState>().startCallFromChat(video: true),
+                icon: Icon(Icons.video_call_outlined, color: p.text1, size: 26),
+              ),
+            ] else ...[
+              IconButton(
+                tooltip: 'Аудиозвонок',
+                onPressed: () =>
+                    context.read<AppState>().startCallFromChat(video: false),
+                icon: Icon(Icons.call, color: p.text1, size: 22),
+              ),
+              IconButton(
+                tooltip: 'Видеозвонок',
+                onPressed: () =>
+                    context.read<AppState>().startCallFromChat(video: true),
+                icon: Icon(Icons.videocam_outlined, color: p.text1, size: 24),
+              ),
+            ],
+          ],
           Icon(Icons.more_horiz, color: p.text1, size: 24),
         ],
       ),

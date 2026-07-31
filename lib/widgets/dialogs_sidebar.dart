@@ -4,6 +4,8 @@ import 'package:provider/provider.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/attachment_selection.dart';
+import 'dialog_drop_target.dart';
 import 'dialog_tile.dart';
 import 'filter_tabs.dart';
 import 'sidebar_header.dart';
@@ -20,22 +22,26 @@ class DialogsSidebar extends StatelessWidget {
 
     return Container(
       color: p.bg1,
-      child: Column(
-        children: [
-          const SidebarHeader(),
-          if (state.connectionStatus == ConnectionStatus.error)
-            _ErrorBanner(
-              message: state.connectionError ?? 'Ошибка подключения',
-              onRetry: () => context.read<AppState>().retryConnection(),
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => AttachmentSelection.clearIfOutside(),
+        child: Column(
+          children: [
+            const SidebarHeader(),
+            if (state.connectionStatus == ConnectionStatus.error)
+              _ErrorBanner(
+                message: state.connectionError ?? 'Ошибка подключения',
+                onRetry: () => context.read<AppState>().retryConnection(),
+              ),
+            const SizedBox(height: 6),
+            const FilterTabs(),
+            const SizedBox(height: 4),
+            Divider(height: 1, color: p.border1),
+            Expanded(
+              child: _buildBody(context, state, p, dialogs),
             ),
-          const SizedBox(height: 6),
-          const FilterTabs(),
-          const SizedBox(height: 4),
-          Divider(height: 1, color: p.border1),
-          Expanded(
-            child: _buildBody(context, state, p, dialogs),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -73,17 +79,74 @@ class DialogsSidebar extends StatelessWidget {
       );
     }
 
-    return ListView.builder(
-      padding: EdgeInsets.zero,
-      itemCount: dialogs.length,
-      itemBuilder: (context, index) {
-        final d = dialogs[index];
-        return DialogTile(
-          dialog: d,
-          selected: d.id == state.selectedId,
-          onTap: () => context.read<AppState>().selectDialog(d.id),
+    return ValueListenableBuilder<String?>(
+      valueListenable: DialogDropHover.id,
+      builder: (context, hoverId, _) {
+        return _DialogsScrollList(
+          dialogs: dialogs,
+          selectedId: state.selectedId,
+          hoverId: hoverId,
+          onSelect: (id) => context.read<AppState>().selectDialog(id),
         );
       },
+    );
+  }
+}
+
+class _DialogsScrollList extends StatefulWidget {
+  final List<DialogsListViewModel> dialogs;
+  final String? selectedId;
+  final String? hoverId;
+  final void Function(String? id) onSelect;
+
+  const _DialogsScrollList({
+    required this.dialogs,
+    required this.selectedId,
+    required this.hoverId,
+    required this.onSelect,
+  });
+
+  @override
+  State<_DialogsScrollList> createState() => _DialogsScrollListState();
+}
+
+class _DialogsScrollListState extends State<_DialogsScrollList> {
+  final _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      controller: _controller,
+      thumbVisibility: true,
+      child: ListView.builder(
+        controller: _controller,
+        primary: false,
+        padding: EdgeInsets.zero,
+        itemCount: widget.dialogs.length,
+        itemBuilder: (context, index) {
+          final d = widget.dialogs[index];
+          final id = d.id?.trim() ?? '';
+          final selected =
+              widget.hoverId == null && d.id == widget.selectedId;
+          final tile = DialogTile(
+            dialog: d,
+            selected: selected,
+            dropHover: widget.hoverId != null && widget.hoverId == id,
+            onTap: () => widget.onSelect(d.id),
+          );
+          if (id.isEmpty) return tile;
+          return DialogDropTarget(
+            dlgId: id,
+            child: tile,
+          );
+        },
+      ),
     );
   }
 }

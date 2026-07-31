@@ -8,6 +8,7 @@ class LikesMapper {
   static List<MessageEmojiModel> parseList(
     dynamic raw, {
     String? currentUserId,
+    String? currentUserName,
   }) {
     if (raw is! List) return <MessageEmojiModel>[];
     final parsed = raw
@@ -18,18 +19,149 @@ class LikesMapper {
             ))
         .where((e) => e.emoji.isNotEmpty)
         .toList();
-    return normalizeOnePerUser(parsed, currentUserId: currentUserId);
+    return enrichCurrentUser(
+      normalizeOnePerUser(parsed, currentUserId: currentUserId),
+      currentUserId: currentUserId,
+      currentUserName: currentUserName,
+    );
   }
 
   static List<MessageEmojiModel> parseAddLikeResponse(
     Map<String, dynamic> map, {
     String? currentUserId,
+    String? currentUserName,
   }) {
+    List<MessageEmojiModel> likes = const [];
+
     final body = map['body'];
-    if (body is! List || body.isEmpty) return <MessageEmojiModel>[];
-    final first = body.first;
-    if (first is! Map) return <MessageEmojiModel>[];
-    return parseList(first['data'], currentUserId: currentUserId);
+    if (body is List && body.isNotEmpty) {
+      final first = body.first;
+      if (first is Map) {
+        likes = parseList(
+          first['data'] ?? first['likes'],
+          currentUserId: currentUserId,
+          currentUserName: currentUserName,
+        );
+      }
+    }
+
+    if (likes.isEmpty) {
+      final data = map['data'];
+      if (data is Map) {
+        likes = parseList(
+          data['likes'] ?? data['data'],
+          currentUserId: currentUserId,
+          currentUserName: currentUserName,
+        );
+      } else if (data is List) {
+        likes = parseList(
+          data,
+          currentUserId: currentUserId,
+          currentUserName: currentUserName,
+        );
+      }
+    }
+
+    if (likes.isEmpty) {
+      likes = parseList(
+        map['likes'],
+        currentUserId: currentUserId,
+        currentUserName: currentUserName,
+      );
+    }
+
+    return enrichCurrentUser(
+      likes,
+      currentUserId: currentUserId,
+      currentUserName: currentUserName,
+    );
+  }
+
+  /// В ответе есть явный список likes (в т.ч. пустой `body: []` у del_like — нет).
+  static bool responseHasLikesPayload(Map<String, dynamic> map) {
+    final body = map['body'];
+    if (body is List) {
+      if (body.isEmpty) return false;
+      final first = body.first;
+      if (first is Map) {
+        final data = first['data'] ?? first['likes'];
+        if (data is List) return true;
+      }
+    }
+
+    final data = map['data'];
+    if (data is Map) {
+      final likes = data['likes'] ?? data['data'];
+      if (likes is List) return true;
+    } else if (data is List) {
+      // data как список likes (не поля запроса add/del_like).
+      if (data.isEmpty) return true;
+      final first = data.first;
+      if (first is Map &&
+          (first.containsKey('emoji') || first.containsKey('arr'))) {
+        return true;
+      }
+    }
+
+    return map['likes'] is List;
+  }
+
+  /// Подставить имя текущего пользователя в его реакции (сервер часто шлёт пустое).
+  static List<MessageEmojiModel> enrichCurrentUser(
+    List<MessageEmojiModel> reactions, {
+    String? currentUserId,
+    String? currentUserName,
+  }) {
+    final myId = currentUserId?.trim() ?? '';
+    final myName = currentUserName?.trim() ?? '';
+    if (myId.isEmpty || myName.isEmpty) return reactions;
+
+    for (final reaction in reactions) {
+      var touched = false;
+      final names = List<String>.from(reaction.usrName);
+      final ids = List<String>.from(reaction.usrIds);
+
+      for (var i = 0; i < ids.length; i++) {
+        if (!ReactionUtils.sameUserId(ids[i], myId)) continue;
+        while (names.length <= i) {
+          names.add('');
+        }
+        names[i] = myName;
+        touched = true;
+      }
+
+      if (reaction.my && !touched) {
+        if (ids.isEmpty) {
+          ids.add(myId);
+          names.add(myName);
+        } else {
+          // my=true, но id не совпал — всё равно подпишем первую запись без имени
+          for (var i = 0; i < names.length; i++) {
+            if (names[i].trim().isEmpty) {
+              names[i] = myName;
+              if (i < ids.length && ids[i].trim().isEmpty) {
+                ids[i] = myId;
+              }
+              touched = true;
+              break;
+            }
+          }
+          if (!touched) {
+            ids.add(myId);
+            names.add(myName);
+          }
+        }
+        touched = true;
+      }
+
+      if (touched) {
+        reaction.usrName = names;
+        reaction.usrIds = ids;
+        reaction.my = true;
+        reaction.qty = names.length;
+      }
+    }
+    return reactions;
   }
 
   /// У каждого автора — не более одной реакции (последняя побеждает).
@@ -43,16 +175,16 @@ class LikesMapper {
     for (final reaction in reactions) {
       final count = reaction.usrName.length;
       for (var i = 0; i < count; i++) {
-        final uid = i < reaction.usrIds.length
-            ? reaction.usrIds[i].trim()
-            : '';
-        final key = uid.isNotEmpty ? uid : '_name:${reaction.usrName[i].trim()}';
+        final uid =
+            i < reaction.usrIds.length ? reaction.usrIds[i].trim() : '';
+        final name = reaction.usrName[i].trim();
+        final key = uid.isNotEmpty ? uid : '_name:$name';
         if (key == '_name:') continue;
 
         winners[key] = _ReactionUserEntry(
           emoji: reaction.emoji,
           usrId: uid,
-          usrName: reaction.usrName[i].trim(),
+          usrName: name,
           avaColor: i < reaction.avaColor.length ? reaction.avaColor[i] : 0,
           avatar: i < reaction.avatars.length ? reaction.avatars[i] : '',
           date: i < reaction.date.length ? reaction.date[i] : '',
@@ -65,26 +197,29 @@ class LikesMapper {
       byEmoji.putIfAbsent(entry.emoji, () => []).add(entry);
     }
 
-    return byEmoji.entries
-        .map((e) {
-          final users = e.value;
-          var my = false;
-          if (myId.isNotEmpty) {
-            my = users.any((u) => ReactionUtils.sameUserId(u.usrId, myId));
-          }
-          return MessageEmojiModel(
-            emoji: e.key,
-            my: my,
-            qty: users.length,
-            usrName: users.map((u) => u.usrName).toList(),
-            usrIds: users.map((u) => u.usrId).toList(),
-            avaColor: users.map((u) => u.avaColor).toList(),
-            avatars: users.map((u) => u.avatar).toList(),
-            date: users.map((u) => u.date).toList(),
-          );
-        })
-        .toList();
+    return byEmoji.entries.map((e) {
+      final users = e.value;
+      final my = myId.isNotEmpty &&
+          users.any((u) => ReactionUtils.sameUserId(u.usrId, myId));
+      return MessageEmojiModel(
+        emoji: e.key,
+        my: my,
+        qty: users.length,
+        usrName: users.map((u) => u.usrName).toList(),
+        usrIds: users.map((u) => u.usrId).toList(),
+        avaColor: users.map((u) => u.avaColor).toList(),
+        avatars: users.map((u) => u.avatar).toList(),
+        date: users.map((u) => u.date).toList(),
+      );
+    }).toList();
   }
+
+  /// @nodoc Совместимость со старым именем API.
+  static List<MessageEmojiModel> mergeByEmoji(
+    List<MessageEmojiModel> reactions, {
+    String? currentUserId,
+  }) =>
+      normalizeOnePerUser(reactions, currentUserId: currentUserId);
 
   static MessageEmojiModel _parseLikeEntry(
     Map<String, dynamic> json, {

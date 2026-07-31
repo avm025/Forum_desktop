@@ -9,6 +9,7 @@ import 'status_ticks.dart';
 class DialogTile extends StatelessWidget {
   final DialogsListViewModel dialog;
   final bool selected;
+  final bool dropHover;
   final VoidCallback onTap;
 
   const DialogTile({
@@ -16,23 +17,28 @@ class DialogTile extends StatelessWidget {
     required this.dialog,
     required this.selected,
     required this.onTap,
+    this.dropHover = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final onSelected = selected;
-    final titleColor = onSelected ? Colors.white : p.text1;
-    final subColor = onSelected ? Colors.white70 : p.text2;
-    final timeColor = onSelected ? Colors.white70 : p.text2;
+    final emphasized = selected || dropHover;
+    final titleColor = emphasized ? Colors.white : p.text1;
+    final subColor = emphasized ? Colors.white70 : p.text2;
+    final timeColor = emphasized ? Colors.white70 : p.text2;
 
     final isOutgoing = dialog.last_msg_status >= 0;
+    final bg = dropHover
+        ? p.purple.withValues(alpha: 0.85)
+        : (selected ? p.selectedTile : Colors.transparent);
 
     return InkWell(
       onTap: onTap,
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
         height: 80,
-        color: onSelected ? p.selectedTile : Colors.transparent,
+        color: bg,
         padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -95,7 +101,7 @@ class DialogTile extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 8),
-                _trailingIndicator(p, onSelected),
+                _trailingIndicator(p, emphasized),
               ],
             ),
           ],

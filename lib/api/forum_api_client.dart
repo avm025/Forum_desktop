@@ -10,6 +10,7 @@ import '../models/device_session.dart';
 import '../models/dialog_group.dart';
 import '../models/emoji_category.dart';
 import '../models/dialogs_list_view_model.dart';
+import '../models/msg_read_entry.dart';
 import '../models/user_profile.dart';
 import 'api_config.dart';
 import 'contacts_service.dart';
@@ -53,6 +54,9 @@ typedef MsgDelPushHandler = void Function(Map<String, dynamic> data);
 /// Push `add_like` — обновление реакций (WS_MSG_LIKES.md).
 typedef AddLikePushHandler = void Function(Map<String, dynamic> data);
 
+/// Push `typing` — индикатор набора (typing.md).
+typedef TypingPushHandler = void Function(Map<String, dynamic> data);
+
 /// Push `check_qr` с JWT на ожидающем устройстве (онбординг).
 typedef CheckQrAuthHandler = void Function(Map<String, dynamic> data);
 
@@ -75,6 +79,7 @@ class ForumApiClient {
   StatusPushHandler? onStatusPush;
   MsgDelPushHandler? onMsgDelPush;
   AddLikePushHandler? onAddLikePush;
+  TypingPushHandler? onTypingPush;
   CheckQrAuthHandler? onCheckQrAuth;
   ForceLogOutHandler? onForceLogOut;
   WsVoidCallback? onDisconnected;
@@ -94,7 +99,7 @@ class ForumApiClient {
     final profile = await login(uid, fcmToken: fcmToken);
     final contacts = await contactsFuture;
 
-    final dialogsFuture = fetchDialogs(contacts);
+    final dialogsFuture = fetchDialogs(contacts, currentUserId: profile.id);
     final groupsFuture = fetchGroups();
 
     return ForumBootstrapResult(
@@ -146,8 +151,9 @@ class ForumApiClient {
   }
 
   Future<List<DialogsListViewModel>> fetchDialogs(
-    List<ApiContact> contacts,
-  ) async {
+    List<ApiContact> contacts, {
+    String? currentUserId,
+  }) async {
     final dialogsResp = await sendWs({
       'type': 'dlg_list',
       'contacts': contacts.map((c) => c.toJson()).toList(),
@@ -161,7 +167,7 @@ class ForumApiClient {
     }
 
     await ForumCache.instance.saveDialogs(dialogsResp);
-    return parseDialogsResponse(dialogsResp);
+    return parseDialogsResponse(dialogsResp, currentUserId: currentUserId);
   }
 
   Future<List<DialogGroup>> fetchGroups() async {
@@ -178,8 +184,11 @@ class ForumApiClient {
     return parseGroupsResponse(groupsResp);
   }
 
-  List<DialogsListViewModel> parseDialogsResponse(Map<String, dynamic> resp) =>
-      _parseDialogs(resp);
+  List<DialogsListViewModel> parseDialogsResponse(
+    Map<String, dynamic> resp, {
+    String? currentUserId,
+  }) =>
+      _parseDialogs(resp, currentUserId: currentUserId);
 
   List<DialogGroup> parseGroupsResponse(Map<String, dynamic> resp) =>
       _parseGroups(resp);
@@ -188,12 +197,14 @@ class ForumApiClient {
     Map<String, dynamic> map, {
     required String expectedDlgId,
     String? currentUserId,
+    String? currentUserName,
     bool isGroupChat = false,
   }) =>
       _parseMsgListMap(
         map,
         expectedDlgId: expectedDlgId,
         currentUserId: currentUserId,
+        currentUserName: currentUserName,
         isGroupChat: isGroupChat,
       );
 
@@ -521,63 +532,125 @@ class ForumApiClient {
     channel.sink.add(jsonEncode(message));
   }
 
-  /// WS `del_like` — снятие реакции (сервер не toggle'ит повторный `add_like`).
-  void sendDelLike({
+  /// WS `typing` — черновик / индикатор набора (typing.md). Fire-and-forget.
+  /// Поля на верхнем уровне (не в `data`).
+  void sendTyping({
+    required String dlgId,
+    required String body,
+  }) {
+    final channel = _channel;
+    final id = dlgId.trim();
+    if (channel == null || id.isEmpty || id == '0') return;
+
+    final message = {
+      'type': 'typing',
+      'dlg_id': id,
+      'body': body,
+    };
+    ApiLogger.instance.logWsSend('typing', message);
+    channel.sink.add(jsonEncode(message));
+  }
+
+  /// WS `dlg_info` — метаданные диалога; возвращает `users[].typing` текущего пользователя.
+  Future<String?> fetchOwnTypingDraft({
+    required String dlgId,
+    required String currentUserId,
+  }) async {
+    final id = dlgId.trim();
+    final usrId = currentUserId.trim();
+    if (id.isEmpty || id == '0') return null;
+
+    final data = <String, dynamic>{'dlg_id': id};
+    if (usrId.isNotEmpty) data['usr_id'] = usrId;
+
+    final resp = await sendWs({'type': 'dlg_info', 'data': data});
+    return _extractOwnTypingDraft(resp, usrId);
+  }
+
+  /// WS `msg_read_list` — кто прочитал сообщение и когда.
+  Future<List<MsgReadEntry>> fetchMsgReadList({
+    required String dlgId,
+    required String msgId,
+  }) async {
+    final d = dlgId.trim();
+    final m = msgId.trim();
+    if (d.isEmpty || d == '0' || m.isEmpty) return const [];
+
+    final resp = await sendWs({
+      'type': 'msg_read_list',
+      'data': {
+        'dlg_id': d,
+        'msg_id': m,
+      },
+    });
+
+    final raw = resp['data'];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => MsgReadEntry.fromJson(Map<String, dynamic>.from(e)))
+        .where((e) => e.usrId.isNotEmpty)
+        .toList();
+  }
+
+  static String? _extractOwnTypingDraft(
+    Map<String, dynamic> resp,
+    String currentUserId,
+  ) {
+    final users = resp['users'];
+    if (users is! List || currentUserId.isEmpty) return null;
+
+    for (final item in users) {
+      if (item is! Map) continue;
+      final uid = item['usr_id']?.toString().trim() ?? '';
+      if (uid.isEmpty) continue;
+      final same = uid == currentUserId ||
+          (int.tryParse(uid) != null &&
+              int.tryParse(currentUserId) != null &&
+              int.parse(uid) == int.parse(currentUserId));
+      if (!same) continue;
+      final typing = item['typing']?.toString();
+      if (typing == null) return null;
+      return typing;
+    }
+    return null;
+  }
+
+  /// WS `del_like` — снятие реакции. Ждёт ответ сервера.
+  Future<Map<String, dynamic>> delLike({
     required String usrId,
     required String dlgId,
     required String msgId,
     String? emoji,
   }) {
-    final channel = _channel;
-    if (channel == null ||
-        usrId.trim().isEmpty ||
-        dlgId.trim().isEmpty ||
-        msgId.trim().isEmpty) {
-      return;
-    }
-
     final data = <String, dynamic>{
-      'usr_id': usrId,
-      'dlg_id': dlgId,
-      'msg_id': msgId,
+      'usr_id': usrId.trim(),
+      'dlg_id': dlgId.trim(),
+      'msg_id': msgId.trim(),
     };
     final trimmedEmoji = emoji?.trim();
     if (trimmedEmoji != null && trimmedEmoji.isNotEmpty) {
       data['emoji'] = trimmedEmoji;
     }
-
-    final message = {'type': 'del_like', 'data': data};
-    ApiLogger.instance.logWsSend('del_like', message);
-    channel.sink.add(jsonEncode(message));
+    return sendWs({'type': 'del_like', 'data': data});
   }
 
-  /// WS `add_like` — реакция на сообщение (WS_MSG_LIKES.md). Fire-and-forget.
-  void sendAddLike({
+  /// WS `add_like` — поставить реакцию. Ждёт ответ сервера с актуальным `likes`.
+  Future<Map<String, dynamic>> addLike({
     required String usrId,
     required String emoji,
     required String dlgId,
     required String msgId,
   }) {
-    final channel = _channel;
-    if (channel == null ||
-        usrId.trim().isEmpty ||
-        dlgId.trim().isEmpty ||
-        msgId.trim().isEmpty ||
-        emoji.trim().isEmpty) {
-      return;
-    }
-
-    final message = {
+    return sendWs({
       'type': 'add_like',
       'data': {
-        'usr_id': usrId,
-        'emoji': emoji,
-        'dlg_id': dlgId,
-        'msg_id': msgId,
+        'usr_id': usrId.trim(),
+        'emoji': emoji.trim(),
+        'dlg_id': dlgId.trim(),
+        'msg_id': msgId.trim(),
       },
-    };
-    ApiLogger.instance.logWsSend('add_like', message);
-    channel.sink.add(jsonEncode(message));
+    });
   }
 
   /// WS `dlg_grp` — создание или изменение папки (WS_DLG_GRP.md).
@@ -851,9 +924,20 @@ class ForumApiClient {
       }
 
       if (type == 'add_like' || type == 'del_like') {
-        _pending.remove(type);
+        final completer = _pending.remove(type);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(map);
+        } else {
+          ApiLogger.instance.logWsReceive(type, map);
+          onAddLikePush?.call(map);
+        }
+        return;
+      }
+
+      if (type == 'typing') {
+        // Исходящий typing — fire-and-forget (нет pending).
         ApiLogger.instance.logWsReceive(type, map);
-        onAddLikePush?.call(map);
+        onTypingPush?.call(map);
         return;
       }
 
@@ -924,7 +1008,10 @@ class ForumApiClient {
     _pending.clear();
   }
 
-  List<DialogsListViewModel> _parseDialogs(Map<String, dynamic> resp) {
+  List<DialogsListViewModel> _parseDialogs(
+    Map<String, dynamic> resp, {
+    String? currentUserId,
+  }) {
     final data = resp['data'];
     if (data is! Map) return const [];
 
@@ -933,7 +1020,10 @@ class ForumApiClient {
 
     return raw
         .whereType<Map>()
-        .map((e) => DialogMapper.fromServerJson(Map<String, dynamic>.from(e)))
+        .map((e) => DialogMapper.fromServerJson(
+              Map<String, dynamic>.from(e),
+              currentUserId: currentUserId,
+            ))
         .toList();
   }
 
@@ -978,6 +1068,7 @@ class ForumApiClient {
     String dlgId, {
     required MsgListRequest request,
     String? currentUserId,
+    String? currentUserName,
     bool isGroupChat = false,
   }) async {
     final payload = _msgListPayload(dlgId, request);
@@ -1001,6 +1092,7 @@ class ForumApiClient {
       map,
       expectedDlgId: dlgId,
       currentUserId: currentUserId,
+      currentUserName: currentUserName,
       isGroupChat: isGroupChat,
     );
   }
@@ -1050,6 +1142,7 @@ class ForumApiClient {
     Map<String, dynamic> map, {
     required String expectedDlgId,
     String? currentUserId,
+    String? currentUserName,
     bool isGroupChat = false,
   }) {
     if (map['success'] == false) {
@@ -1098,6 +1191,7 @@ class ForumApiClient {
     final messages = MessageMapper.fromMsgList(
       raw,
       currentUserId: currentUserId,
+      currentUserName: currentUserName,
       isGroupChat: isGroupChat,
     );
 

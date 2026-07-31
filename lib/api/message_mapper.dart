@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:intl/intl.dart';
 
 import '../api/api_config.dart';
+import '../calls/call_message_display.dart';
 import '../models/media_file.dart';
 import '../models/message_emoji_model.dart';
 import '../api/likes_mapper.dart';
@@ -15,6 +16,7 @@ class MessageMapper {
   static List<MessageViewModel> fromMsgList(
     List<dynamic> raw, {
     String? currentUserId,
+    String? currentUserName,
     bool isGroupChat = false,
   }) {
     final messages = raw
@@ -22,6 +24,7 @@ class MessageMapper {
         .map((e) => fromServerJson(
               Map<String, dynamic>.from(e),
               currentUserId: currentUserId,
+              currentUserName: currentUserName,
             ))
         .toList();
 
@@ -40,6 +43,7 @@ class MessageMapper {
   static MessageViewModel fromServerJson(
     Map<String, dynamic> json, {
     String? currentUserId,
+    String? currentUserName,
   }) {
     final serverType = json['type']?.toString() ?? 'txt';
     final uiType = _mapType(serverType);
@@ -110,6 +114,17 @@ class MessageMapper {
         address = geo['adrs']?.toString() ?? geo['address']?.toString() ?? '';
         desc = geo['desc']?.toString() ?? '';
         body = address.isNotEmpty ? address : 'Геопозиция';
+      case 'call':
+        // Сырой JSON оставляем в body (reply prn_body / parse).
+        body = bodyRaw;
+        final display = CallMessageDisplay.tryResolve(
+          bodyRaw: bodyJson ?? bodyRaw,
+          frId: frId,
+          currentUserId: currentUserId,
+        );
+        final preview = display?.previewText ?? 'Вызов';
+        text = preview;
+        desc = preview;
       default:
         if (bodyJson != null) {
           desc = bodyJson['desc']?.toString() ?? '';
@@ -118,11 +133,19 @@ class MessageMapper {
     }
 
     final prnBody = json['prn_body']?.toString() ?? '';
+    final prnType = json['prn_type']?.toString() ?? '';
     final prnBodyJson = _tryParseJson(prnBody);
     MediaFile? prnFirstFile;
-    if (prnBodyJson != null) {
+    String resolvedPrnBody = prnBody;
+    if (prnType.toLowerCase() == 'call') {
+      // Для call в prn_body хранится сырой JSON исходного сообщения.
+      resolvedPrnBody = prnBody;
+    } else if (prnBodyJson != null) {
       final prnFiles = _parseFiles(prnBodyJson['files']);
       if (prnFiles.isNotEmpty) prnFirstFile = prnFiles.first;
+      resolvedPrnBody = prnBodyJson['desc']?.toString() ??
+          prnBodyJson['body']?.toString() ??
+          prnBody;
     }
 
     return MessageViewModel(
@@ -144,13 +167,13 @@ class MessageMapper {
       fdir: json['fdir']?.toString() ?? '',
       hash: json['hash']?.toString() ?? '',
       prn_id: _normalizePrnId(json['prn_id']),
-      prn_body: prnBodyJson?['desc']?.toString() ??
-          prnBodyJson?['body']?.toString() ??
-          prnBody,
+      prn_body: resolvedPrnBody,
       prn_fr_id: json['prn_fr_id']?.toString() ?? '',
       prn_fr_name: json['prn_fr_name']?.toString() ?? '',
-      prn_type: json['prn_type']?.toString() ?? '',
-      prn_fileTitle: prnBodyJson?['title']?.toString() ?? '',
+      prn_type: prnType,
+      prn_fileTitle: prnType.toLowerCase() == 'call'
+          ? ''
+          : (prnBodyJson?['title']?.toString() ?? ''),
       prn_firstFile: prnFirstFile,
       repost: _parseRepost(json['repost']),
       fileTitle: fileTitle,
@@ -163,7 +186,11 @@ class MessageMapper {
       latitude: lat,
       longitude: lon,
       address: address,
-      emoji: LikesMapper.parseList(json['likes'], currentUserId: currentUserId),
+      emoji: LikesMapper.parseList(
+        json['likes'],
+        currentUserId: currentUserId,
+        currentUserName: currentUserName,
+      ),
     );
   }
 

@@ -6,6 +6,7 @@ import '../models/media_file.dart';
 import '../models/message_view_model.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/attachment_selection.dart';
 import '../utils/emoticon_replacer.dart';
 import '../utils/file_kind.dart';
 import '../utils/media_message_layout.dart';
@@ -24,28 +25,84 @@ class _MessageInputState extends State<MessageInput> {
   final _focusNode = FocusNode();
   bool _hasText = false;
   MessageViewModel? _lastReplyTarget;
+  String? _boundDlgId;
+  int _appliedDraftEpoch = -1;
+  bool _syncingText = false;
 
   @override
   void initState() {
     super.initState();
-    _controller.addListener(() {
-      final has = _controller.text.trim().isNotEmpty;
-      if (has != _hasText) setState(() => _hasText = has);
-    });
+    _controller.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    if (_syncingText) return;
+    final has = _controller.text.trim().isNotEmpty;
+    if (has != _hasText) setState(() => _hasText = has);
+    context.read<AppState>().reportComposerText(_controller.text);
   }
 
   @override
   void dispose() {
+    _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  void _scheduleDialogBinding(AppState state) {
+    final dlgId = state.selectedDialog?.id;
+    final epoch = state.composerDraftEpoch;
+    if (dlgId == _boundDlgId && epoch == _appliedDraftEpoch) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final s = context.read<AppState>();
+      final id = s.selectedDialog?.id;
+      if (id != _boundDlgId) {
+        _boundDlgId = id;
+        _appliedDraftEpoch = -1;
+        _syncingText = true;
+        _controller.clear();
+        _syncingText = false;
+        if (_hasText) setState(() => _hasText = false);
+      }
+      _tryApplyDraft(s, id);
+    });
+  }
+
+  void _tryApplyDraft(AppState state, String? dlgId) {
+    if (dlgId == null || dlgId.isEmpty) return;
+    if (state.composerDraftEpoch == _appliedDraftEpoch) return;
+    if (_controller.text.trim().isNotEmpty) {
+      _appliedDraftEpoch = state.composerDraftEpoch;
+      return;
+    }
+
+    final draft = state.takeComposerDraft(dlgId);
+    _appliedDraftEpoch = state.composerDraftEpoch;
+    if (draft == null || draft.isEmpty) return;
+
+    _syncingText = true;
+    _controller.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
+    _syncingText = false;
+    setState(() => _hasText = draft.trim().isNotEmpty);
+    state.reportComposerText(draft);
   }
 
   Future<void> _send() async {
     final text = EmoticonReplacer.replace(_controller.text.trim());
     if (text.isEmpty) return;
     await context.read<AppState>().sendMessage(text);
-    if (mounted) _controller.clear();
+    if (!mounted) return;
+    _syncingText = true;
+    _controller.clear();
+    _syncingText = false;
+    setState(() => _hasText = false);
+    context.read<AppState>().reportComposerText('');
   }
 
   Future<void> _openAttachMenu() async {
@@ -118,7 +175,11 @@ class _MessageInputState extends State<MessageInput> {
           files,
           caption: _controller.text,
         );
+    _syncingText = true;
     _controller.clear();
+    _syncingText = false;
+    setState(() => _hasText = false);
+    context.read<AppState>().reportComposerText('');
   }
 
   Future<void> _pickVideos() async {
@@ -145,7 +206,11 @@ class _MessageInputState extends State<MessageInput> {
           files,
           caption: _controller.text,
         );
+    _syncingText = true;
     _controller.clear();
+    _syncingText = false;
+    setState(() => _hasText = false);
+    context.read<AppState>().reportComposerText('');
   }
 
   Future<void> _pickFile() async {
@@ -177,6 +242,8 @@ class _MessageInputState extends State<MessageInput> {
     final p = context.palette;
     final replyTo = state.replyToMessage;
 
+    _scheduleDialogBinding(state);
+
     if (replyTo != null && !identical(replyTo, _lastReplyTarget)) {
       _lastReplyTarget = replyTo;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -186,74 +253,79 @@ class _MessageInputState extends State<MessageInput> {
       _lastReplyTarget = null;
     }
 
-    return Container(
-      decoration: BoxDecoration(
-        color: p.bg1,
-        border: Border(top: BorderSide(color: p.border1)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (replyTo != null)
-            MessageComposerReply(
-              message: replyTo,
-              onClose: state.clearReplyTo,
-            ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                InkWell(
-                  onTap: _openAttachMenu,
-                  customBorder: const CircleBorder(),
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
-                    child: Icon(Icons.attach_file, color: p.text2, size: 24),
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => AttachmentSelection.clearIfOutside(),
+      child: Container(
+        decoration: BoxDecoration(
+          color: p.bg1,
+          border: Border(top: BorderSide(color: p.border1)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (replyTo != null)
+              MessageComposerReply(
+                message: replyTo,
+                onClose: state.clearReplyTo,
+              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  InkWell(
+                    onTap: _openAttachMenu,
+                    customBorder: const CircleBorder(),
+                    child: Padding(
+                      padding: const EdgeInsets.all(2),
+                      child: Icon(Icons.attach_file, color: p.text2, size: 24),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 120),
-                    child: TextField(
-                      controller: _controller,
-                      focusNode: _focusNode,
-                      style: TextStyle(color: p.text1, fontSize: 15),
-                      minLines: 1,
-                      maxLines: 5,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      decoration: InputDecoration(
-                        isCollapsed: true,
-                        hintText: replyTo == null ? 'Сообщение...' : 'Ответ...',
-                        hintStyle: TextStyle(color: p.text2, fontSize: 15),
-                        border: InputBorder.none,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 120),
+                      child: TextField(
+                        controller: _controller,
+                        focusNode: _focusNode,
+                        style: TextStyle(color: p.text1, fontSize: 15),
+                        minLines: 1,
+                        maxLines: 5,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => _send(),
+                        decoration: InputDecoration(
+                          isCollapsed: true,
+                          hintText:
+                              replyTo == null ? 'Сообщение...' : 'Ответ...',
+                          hintStyle: TextStyle(color: p.text2, fontSize: 15),
+                          border: InputBorder.none,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                GestureDetector(
-                  onTap: _send,
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: p.purple,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      _hasText ? Icons.send_rounded : Icons.mic,
-                      color: Colors.white,
-                      size: 20,
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _send,
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: p.purple,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        _hasText ? Icons.send_rounded : Icons.mic,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

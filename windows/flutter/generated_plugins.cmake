@@ -3,7 +3,12 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  connectivity_plus
   firebase_core
+  flutter_webrtc
+  irondash_engine_context
+  livekit_client
+  super_native_extensions
   url_launcher_windows
 )
 

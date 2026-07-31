@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/media_file.dart';
+import 'media_file_loader.dart';
 
 /// Открытие медиа/файловых вложений в системном приложении.
 class FileOpener {
@@ -54,15 +55,48 @@ class FileOpener {
     return false;
   }
 
-  static Future<bool> _openRemote(MediaFile file) async {
+  /// Показать файл в Finder / Проводнике (`open -R` на macOS).
+  static Future<bool> revealInFolder(String path) async {
+    if (kIsWeb) return false;
+    final file = File(path);
+    if (!await file.exists()) return false;
+
+    try {
+      if (Platform.isMacOS) {
+        final result = await Process.run('open', ['-R', path]);
+        return result.exitCode == 0;
+      }
+      if (Platform.isWindows) {
+        final result = await Process.run('explorer', ['/select,', path]);
+        return result.exitCode == 0;
+      }
+      if (Platform.isLinux) {
+        final dir = file.parent.path;
+        final result = await Process.run('xdg-open', [dir]);
+        return result.exitCode == 0;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  static Future<Directory> _openDirFor(MediaFile file) async {
     final tempDir = await getTemporaryDirectory();
-    final dir = Directory('${tempDir.path}/forum_open');
+    final key = file.hash.trim().isNotEmpty
+        ? file.hash.trim()
+        : MediaFileLoader.displayFileName(file)
+            .hashCode
+            .toUnsigned(32)
+            .toRadixString(16);
+    final dir = Directory('${tempDir.path}/forum_open/$key');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
+    return dir;
+  }
 
-    final safeName = _safeFileName(file.fname, file.hash);
-    final local = File('${dir.path}/$safeName');
+  static Future<bool> _openRemote(MediaFile file) async {
+    final dir = await _openDirFor(file);
+    final local = File('${dir.path}/${MediaFileLoader.displayFileName(file)}');
 
     final response = await http
         .get(Uri.parse(file.url))
@@ -91,22 +125,10 @@ class FileOpener {
       return launchUrl(uri, webOnlyWindowName: '_blank');
     }
 
-    final tempDir = await getTemporaryDirectory();
-    final dir = Directory('${tempDir.path}/forum_open');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    final safeName = _safeFileName(file.fname, file.hash);
-    final local = File('${dir.path}/$safeName');
+    final dir = await _openDirFor(file);
+    final local = File('${dir.path}/${MediaFileLoader.displayFileName(file)}');
     await local.writeAsBytes(bytes, flush: true);
     return _openLocalPath(local.path);
-  }
-
-  static String _safeFileName(String fname, String hash) {
-    if (fname.isNotEmpty) {
-      return fname.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    }
-    return 'forum_${hash.isNotEmpty ? hash : DateTime.now().millisecondsSinceEpoch}';
   }
 
   static String mimeFor(MediaFile file) {

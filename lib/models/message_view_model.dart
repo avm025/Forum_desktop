@@ -1,3 +1,4 @@
+import '../calls/call_message_display.dart';
 import 'media_file.dart';
 import 'message_emoji_model.dart';
 
@@ -108,10 +109,16 @@ class MessageViewModel {
   bool get hasReply => prn_id.trim().isNotEmpty;
 
   /// Текст цитируемого сообщения для превью в композере и action sheet.
-  String get quotedPreviewText {
-    final body = this.body.trim();
-    final text = this.text.trim();
-    final content = body.isNotEmpty ? body : text;
+  String quotedPreviewTextFor(String? currentUserId) {
+    if (isCall) {
+      final fallback = desc.trim().isNotEmpty
+          ? desc.trim()
+          : (text.trim().isNotEmpty ? text.trim() : 'Вызов');
+      return callDisplay(currentUserId: currentUserId)?.previewText ?? fallback;
+    }
+    final bodyValue = body.trim();
+    final textValue = text.trim();
+    final content = bodyValue.isNotEmpty ? bodyValue : textValue;
     switch (type.toLowerCase()) {
       case 'voice':
         return content.isNotEmpty ? 'Аудиосообщение $content' : 'Голосовое сообщение';
@@ -135,6 +142,14 @@ class MessageViewModel {
     }
   }
 
+  String get quotedPreviewText => quotedPreviewTextFor(null);
+
+  /// Значение `prn_body` при ответе: для call — сырой JSON body.
+  String get wirePrnBody {
+    if (isCall) return body;
+    return quotedPreviewText;
+  }
+
   String get quotedAuthorName => my ? 'Вы' : fr_name.trim();
 
   bool get quotedShowsMediaThumb {
@@ -154,9 +169,16 @@ class MessageViewModel {
   }
 
   /// Текст превью цитируемого сообщения (как AnswerMessage в iOS).
-  String get replyPreviewText {
+  String replyPreviewTextFor(String? currentUserId) {
     final body = prn_body.trim();
     switch (prn_type.toLowerCase()) {
+      case 'call':
+        return CallMessageDisplay.tryResolve(
+              bodyRaw: body,
+              frId: prn_fr_id,
+              currentUserId: currentUserId,
+            )?.previewText ??
+            (body.isNotEmpty ? body : 'Вызов');
       case 'voice':
         return body.isNotEmpty ? 'Аудиосообщение $body' : 'Голосовое сообщение';
       case 'file':
@@ -179,6 +201,9 @@ class MessageViewModel {
     }
   }
 
+  /// Превью цитаты без учёта стороны (fallback для виджетов без профиля).
+  String get replyPreviewText => replyPreviewTextFor(null);
+
   bool get replyShowsMediaThumb {
     final type = prn_type.toLowerCase();
     const mediaTypes = {'media', 'img', 'image', 'video'};
@@ -198,4 +223,21 @@ class MessageViewModel {
   bool get isFile => type == 'file';
   bool get isLocation =>
       type == 'location' || type == 'geo' || hasLocation;
+  bool get isCall => type.toLowerCase() == 'call';
+
+  CallMessageBody? get callBody =>
+      isCall ? CallMessageBody.tryParse(body) : null;
+
+  CallMessageDisplay? callDisplay({required String? currentUserId}) {
+    final parsed = callBody;
+    if (parsed == null) return null;
+    final me = (currentUserId != null && currentUserId.trim().isNotEmpty)
+        ? currentUserId
+        : (my ? fr_id : null);
+    return CallMessageDisplay.resolve(
+      body: parsed,
+      frId: fr_id,
+      currentUserId: me,
+    );
+  }
 }
