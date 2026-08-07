@@ -6,6 +6,7 @@ import '../../calls/call_manager.dart';
 import '../../calls/call_models.dart';
 import '../../theme/app_theme.dart';
 import 'call_controls.dart';
+import 'call_e2ee_badge.dart';
 
 /// Экран 1:1 аудиозвонка.
 class AudioCallScreen extends StatelessWidget {
@@ -40,6 +41,7 @@ class AudioCallScreen extends StatelessWidget {
               status,
               style: TextStyle(color: p.lime, fontSize: 15),
             ),
+            const CallE2eeBadge(),
             const Spacer(),
             CircleAvatar(
               radius: 64,
@@ -257,6 +259,22 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
           Positioned(
             left: 0,
             right: 0,
+            top: 48,
+            child: Column(
+              children: [
+                if (VideoCallScreen._statusLabel(session.state).isNotEmpty)
+                  Text(
+                    VideoCallScreen._statusLabel(session.state),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+                const CallE2eeBadge(),
+              ],
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
             bottom: 28,
             child: CallControlsBar(
               micOn: calls.micEnabled,
@@ -362,6 +380,7 @@ class GroupCallScreen extends StatelessWidget {
                 ],
               ),
             ),
+            const CallE2eeBadge(compact: true),
             Expanded(
               child: GridView.builder(
                 padding: const EdgeInsets.all(12),

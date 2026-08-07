@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../calls/call_manager.dart';
+import '../calls/call_message_display.dart';
 import '../calls/call_models.dart';
 import '../api/contacts_service.dart';
 import '../api/device_id_service.dart';
@@ -450,6 +451,7 @@ class AppState extends ChangeNotifier {
         userName: profile.name,
         sessionToken: token,
       );
+      CallManager.instance.onCallChatResult = _insertCallChatMessage;
       final fcm = FirebaseService.instance.fcmToken;
       if (fcm.isNotEmpty) {
         CallManager.instance.registerVoipToken(fcm);
@@ -457,6 +459,90 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       ApiLogger.instance.logEvent('CALL', 'configure failed: $e');
     }
+  }
+
+  /// Локальный пузырь `type=call` (msg_call.md). Серверное эхо дедупится по call_id.
+  void _insertCallChatMessage(CallChatResult result) {
+    var dlgId = (result.dlgId ?? '').trim();
+    DialogsListViewModel? dialog;
+    if (dlgId.isNotEmpty && dlgId != '0') {
+      dialog = _findDialog(dlgId);
+    }
+    // Fallback: 1:1 по собеседнику, если в сигналинге не было dlgId.
+    if (dialog == null) {
+      dialog = _findDialogForCallResult(result);
+      dlgId = dialog?.id?.trim() ?? dlgId;
+    }
+    if (dialog == null || dlgId.isEmpty || dlgId == '0') {
+      ApiLogger.instance.logEvent(
+        'CALL',
+        'call chat msg skipped: no dialog dlgId=${result.dlgId} '
+        'caller=${result.callerId} callId=${result.callId}',
+      );
+      return;
+    }
+
+    final me = _profile?.id;
+    final isMine = CallMessageDisplay.sameUserId(result.callerId, me);
+    final display = CallMessageDisplay.resolve(
+      body: CallMessageBody(
+        media: result.media,
+        type: result.type,
+        duration: result.durationSec,
+        rejectUsrId: result.rejectUsrId,
+        callId: result.callId,
+      ),
+      frId: result.callerId,
+      currentUserId: me,
+    );
+    final preview = display.previewText;
+    final callId = result.callId.trim();
+    final localId = (callId.isNotEmpty && callId != 'pending')
+        ? 'call_local_$callId'
+        : ClientMsgHash.generate();
+
+    final message = MessageViewModel(
+      id: localId,
+      type: 'call',
+      my: isMine,
+      body: result.bodyJson,
+      text: preview,
+      desc: preview,
+      fr_name: result.callerName.isNotEmpty
+          ? result.callerName
+          : (isMine ? (_profile?.name ?? '') : ''),
+      fr_id: result.callerId,
+      dttmcr: _nowIso(),
+      dtshow: _nowTime(),
+      status: 1,
+      hash: localId,
+    );
+
+    _applySingleMessage(dialog, dlgId, message);
+  }
+
+  DialogsListViewModel? _findDialogForCallResult(CallChatResult result) {
+    final me = _profile?.id;
+    final peerCandidates = <String>{};
+    final peer = result.peerUserId.trim();
+    if (peer.isNotEmpty && !CallMessageDisplay.sameUserId(peer, me)) {
+      peerCandidates.add(peer);
+    }
+    if (!CallMessageDisplay.sameUserId(result.callerId, me)) {
+      peerCandidates.add(result.callerId.trim());
+    }
+    if (peerCandidates.isEmpty) return null;
+    for (final d in _dialogs) {
+      final uid = d.usr_id?.trim() ?? '';
+      if (uid.isEmpty) continue;
+      for (final p in peerCandidates) {
+        if (CallMessageDisplay.sameUserId(uid, p)) {
+          final id = d.id?.trim() ?? '';
+          if (id.isNotEmpty && id != '0') return d;
+        }
+      }
+    }
+    return null;
   }
 
   /// Аудио/видеозвонок из шапки чата (1:1 или группа).

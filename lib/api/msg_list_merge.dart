@@ -1,3 +1,4 @@
+import '../calls/call_message_display.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/message_view_model.dart';
 import 'message_mapper.dart';
@@ -39,13 +40,44 @@ class MsgListMerge {
   }) {
     final idx = _findMatchIndex(dialog.messages, incoming);
     if (idx != null) {
-      MessageMapper.updateFromServer(dialog.messages[idx], incoming);
+      final existing = dialog.messages[idx];
+      // Не затирать локальный cancelled/missed серверным talk duration:0
+      // (бывает после ошибочного hangup до ответа).
+      if (_shouldKeepLocalCallResult(existing, incoming)) {
+        if (incoming.id.isNotEmpty &&
+            !isLocalSkeleton(incoming) &&
+            (existing.id.isEmpty || isLocalSkeleton(existing))) {
+          existing.id = incoming.id;
+        }
+        return true;
+      }
+      MessageMapper.updateFromServer(existing, incoming);
       return true;
     }
 
     if (!_hasIdentity(incoming)) return false;
     dialog.messages.add(incoming);
     return true;
+  }
+
+  static bool _shouldKeepLocalCallResult(
+    MessageViewModel existing,
+    MessageViewModel incoming,
+  ) {
+    if (existing.type.toLowerCase() != 'call') return false;
+    if (incoming.type.toLowerCase() != 'call') return false;
+    final local = CallMessageBody.tryParse(existing.body);
+    final remote = CallMessageBody.tryParse(incoming.body);
+    if (local == null || remote == null) return false;
+    if (local.callId.isEmpty ||
+        remote.callId.isEmpty ||
+        local.callId != remote.callId) {
+      return false;
+    }
+    final localFailed =
+        local.type == 'cancelled' || local.type == 'missed';
+    final remoteTalkZero = remote.type == 'talk' && remote.duration <= 0;
+    return localFailed && remoteTalkZero;
   }
 
   static bool _hasIdentity(MessageViewModel m) {
@@ -86,7 +118,21 @@ class MsgListMerge {
       }
     }
 
+    // 3. Сообщения type=call: дедуп локального пузыря и серверного call_msg по call_id.
+    final incomingCallId = _callIdOf(incoming);
+    if (incomingCallId != null) {
+      for (var i = 0; i < messages.length; i++) {
+        if (_callIdOf(messages[i]) == incomingCallId) return i;
+      }
+    }
+
     return null;
+  }
+
+  static String? _callIdOf(MessageViewModel m) {
+    if (m.type.toLowerCase() != 'call') return null;
+    final id = CallMessageBody.tryParse(m.body)?.callId.trim() ?? '';
+    return id.isEmpty ? null : id;
   }
 
   static void _prependHistory(

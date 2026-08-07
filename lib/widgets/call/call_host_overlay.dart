@@ -78,6 +78,21 @@ class _IncomingBanner extends StatelessWidget {
                 invite.isGroup ? 'Групповой звонок' : 'Входящий звонок',
                 style: TextStyle(color: p.text2, fontSize: 13),
               ),
+              if (invite.e2eeEnabled)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.lock_rounded, size: 14, color: p.lime),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Сквозное шифрование',
+                        style: TextStyle(color: p.lime, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
               const SizedBox(height: 6),
               Text(
                 title,

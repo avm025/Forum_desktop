@@ -190,20 +190,38 @@ class CallSignalingClient {
     });
   }
 
-  void sendReject({required String callId}) {
-    _send({
-      'type': 'call.reject',
-      'callId': callId,
-      'payload': <String, dynamic>{},
-    });
-  }
-
-  void sendCancel({required String callId}) {
+  void sendCancel({
+    required String callId,
+    String? dlgId,
+    List<String>? callees,
+  }) {
     if (callId.isEmpty || callId == 'pending') return;
+    final peers =
+        callees?.where((e) => e.trim().isNotEmpty).toList() ?? const [];
     _send({
       'type': 'call.cancel',
       'callId': callId,
-      'payload': <String, dynamic>{},
+      'payload': <String, dynamic>{
+        if (dlgId != null && dlgId.isNotEmpty) 'dlgId': dlgId,
+        if (peers.isNotEmpty) 'callees': peers,
+      },
+    });
+  }
+
+  void sendReject({
+    required String callId,
+    String? dlgId,
+    List<String>? callees,
+  }) {
+    final peers =
+        callees?.where((e) => e.trim().isNotEmpty).toList() ?? const [];
+    _send({
+      'type': 'call.reject',
+      'callId': callId,
+      'payload': <String, dynamic>{
+        if (dlgId != null && dlgId.isNotEmpty) 'dlgId': dlgId,
+        if (peers.isNotEmpty) 'callees': peers,
+      },
     });
   }
 
@@ -531,5 +549,6 @@ IncomingCallInvite? parseIncomingInvite(Map<String, dynamic> map) {
     groupId: (body['groupId'] ?? body['group_id'])?.toString(),
     dlgId: (body['dlgId'] ?? body['dlg_id'])?.toString(),
     title: body['title']?.toString() ?? '',
+    e2eeEnabled: parseCallE2eeFlag(map),
   );
 }

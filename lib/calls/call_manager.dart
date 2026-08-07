@@ -15,6 +15,9 @@ class CallManager extends ChangeNotifier {
   final CallSignalingClient _signaling = CallSignalingClient();
   StreamSubscription? _sigSub;
 
+  /// Локальная вставка msg type=call в чат (сервер тоже шлёт — дедуп по call_id).
+  void Function(CallChatResult result)? onCallChatResult;
+
   CallSession? _session;
   IncomingCallInvite? _incoming;
   Room? _room;
@@ -25,7 +28,17 @@ class CallManager extends ChangeNotifier {
   bool _invitePickerOpen = false;
   /// Пользователь нажал «Завершить» до call.token / LiveKit — отменим, как только будет callId.
   bool _endRequested = false;
+  /// Локальное завершение в процессе — не эмитить chat-result из RoomDisconnected.
+  bool _localEnding = false;
+  bool _chatResultSent = false;
+  DateTime? _connectedAt;
+  /// Собеседник принял / зашёл в комнату. LiveKit у caller поднимается сразу —
+  /// это ещё не «отвеченный» звонок (иначе уходит hangup→talk вместо cancel).
+  bool _remoteAccepted = false;
   String? _localUserId;
+  String? _localUserName;
+  /// Контекст завершения после очистки session (deferred cancel/hangup).
+  _DeferredCallEnd? _deferredEnd;
 
   CallSession? get session => _session;
   IncomingCallInvite? get incoming => _incoming;
@@ -34,6 +47,8 @@ class CallManager extends ChangeNotifier {
   bool get camEnabled => _camEnabled;
   bool get speakerOn => _speakerOn;
   bool get invitePickerOpen => _invitePickerOpen;
+  /// Сквозное шифрование медиа (call_e2ee.md / iOS CallManager.isE2EEEnabled).
+  bool get isE2EEEnabled => _session?.e2eeEnabled == true;
   bool get hasActiveCall =>
       _session != null &&
       _session!.state != CallState.idle &&
@@ -46,6 +61,7 @@ class CallManager extends ChangeNotifier {
     required String sessionToken,
   }) async {
     _localUserId = userId.trim();
+    _localUserName = userName.trim();
     await _sigSub?.cancel();
     _sigSub = _signaling.events.listen(_onSignalingEvent);
     await _signaling.connect(sessionToken: sessionToken);
@@ -64,6 +80,7 @@ class CallManager extends ChangeNotifier {
   }
 
   Future<void> shutdown() async {
+    onCallChatResult = null;
     await hangup(local: true);
     await _signaling.disconnect();
   }
@@ -145,6 +162,11 @@ class CallManager extends ChangeNotifier {
       return;
     }
     _endRequested = false;
+    _localEnding = false;
+    _deferredEnd = null;
+    _chatResultSent = false;
+    _connectedAt = null;
+    _remoteAccepted = false;
     const callId = 'pending';
     _incoming = null;
     _micEnabled = true;
@@ -188,6 +210,11 @@ class CallManager extends ChangeNotifier {
       return;
     }
     _endRequested = false;
+    _localEnding = false;
+    _deferredEnd = null;
+    _chatResultSent = false;
+    _connectedAt = null;
+    _remoteAccepted = false;
     const callId = 'pending';
     final ids = participants
         .map((p) => p.userId.trim())
@@ -223,6 +250,12 @@ class CallManager extends ChangeNotifier {
     final invite = _incoming;
     if (invite == null) return;
     _endRequested = false;
+    _localEnding = false;
+    _deferredEnd = null;
+    _chatResultSent = false;
+    _connectedAt = null;
+    // Входящий: приняли сами — для hangup/talk это уже «отвеченный» звонок.
+    _remoteAccepted = true;
     _incoming = null;
     _micEnabled = true;
     _camEnabled = withVideo || invite.video;
@@ -244,6 +277,7 @@ class CallManager extends ChangeNotifier {
         ),
       ],
       state: CallState.connectingMedia,
+      e2eeEnabled: invite.e2eeEnabled,
     );
     notifyListeners();
     _signaling.sendAccept(callId: invite.callId, video: _camEnabled);
@@ -252,7 +286,24 @@ class CallManager extends ChangeNotifier {
   void declineIncoming() {
     final invite = _incoming;
     if (invite == null) return;
-    _signaling.sendReject(callId: invite.callId);
+    final me = _localUserId ?? '';
+    _signaling.sendReject(
+      callId: invite.callId,
+      dlgId: invite.dlgId ?? invite.groupId,
+    );
+    _emitCallChatResult(
+      CallChatResult(
+        dlgId: invite.dlgId ?? invite.groupId,
+        callId: invite.callId,
+        media: invite.video ? 'video' : 'audio',
+        type: 'cancelled',
+        rejectUsrId: me,
+        callerId: invite.callerId,
+        callerName: invite.callerName,
+        outgoing: false,
+        peerUserId: invite.callerId,
+      ),
+    );
     _incoming = null;
     notifyListeners();
   }
@@ -260,34 +311,74 @@ class CallManager extends ChangeNotifier {
   Future<void> hangup({bool local = true}) async {
     final session = _session;
     _invitePickerOpen = false;
+    CallChatResult? chatResult;
     if (session != null && local) {
+      _localEnding = true;
+      chatResult = _resultForLocalHangup(session);
+      // Сразу в чат — до leaveRoom, иначе RoomDisconnected может перебить тип.
+      _emitCallChatResult(chatResult);
+      chatResult = null;
+
       final peers = session.peers
           .map((p) => p.userId.trim())
           .where((e) => e.isNotEmpty)
           .toList();
-      if (session.callId.isEmpty || session.callId == 'pending') {
-        // Пока нет callId — шлём hangup по callees/dlgId и ждём call.token для точного id.
+      final dlgId = session.dlgId ?? session.groupId;
+      final answered = _isAnswered(session);
+      final preferCancel =
+          !answered && session.direction == CallDirection.outgoing;
+      final callId = session.callId.trim();
+      final hasCallId = callId.isNotEmpty && callId != 'pending';
+
+      _deferredEnd = _DeferredCallEnd(
+        preferCancel: preferCancel,
+        peers: peers,
+        dlgId: dlgId,
+        callId: hasCallId ? callId : null,
+      );
+
+      if (preferCancel) {
+        // Только cancel: hangup до ответа сервер пишет как talk (duration:0).
+        if (hasCallId) {
+          _endRequested = false;
+          _signaling.sendCancel(
+            callId: callId,
+            dlgId: dlgId,
+            callees: peers,
+          );
+          ApiLogger.instance.logEvent(
+            'CALL',
+            'outgoing cancel callId=$callId peers=${peers.length}',
+          );
+        } else {
+          _endRequested = true;
+          // Без callId — мягкий hangup по callees; cancel дошлём в deferred.
+          _signaling.sendHangup(
+            callId: 'pending',
+            callees: peers,
+            dlgId: dlgId,
+          );
+        }
+      } else if (!hasCallId) {
         _endRequested = true;
         _signaling.sendHangup(
           callId: 'pending',
           callees: peers,
-          dlgId: session.dlgId ?? session.groupId,
-        );
-        ApiLogger.instance.logEvent(
-          'CALL',
-          'hangup before callId — sent by callees, defer by id',
+          dlgId: dlgId,
         );
       } else {
         _endRequested = false;
         _signaling.sendHangup(
-          callId: session.callId,
+          callId: callId,
           callees: peers,
-          dlgId: session.dlgId ?? session.groupId,
+          dlgId: dlgId,
         );
       }
-    } else {
+    } else if (local) {
       _endRequested = false;
+      _deferredEnd = null;
     }
+
     await _leaveRoom();
     if (_session != null) {
       _session = _session!.copyWith(state: CallState.ended);
@@ -295,12 +386,85 @@ class CallManager extends ChangeNotifier {
       _session = null;
       notifyListeners();
     }
+    if (chatResult != null) _emitCallChatResult(chatResult);
+    if (!_endRequested) {
+      _deferredEnd = null;
+      _localEnding = false;
+    }
   }
 
+  /// Исходящий «отвечен» только когда remote принял; LiveKit у caller — не критерий.
+  bool _isAnswered(CallSession session) {
+    if (session.direction == CallDirection.outgoing) {
+      return _remoteAccepted;
+    }
+    return _remoteAccepted ||
+        session.state == CallState.active ||
+        (_room != null && _connectedAt != null);
+  }
+
+  void _markRemoteAccepted() {
+    if (_remoteAccepted) return;
+    _remoteAccepted = true;
+    _connectedAt ??= DateTime.now();
+    if (_session != null &&
+        _session!.state != CallState.ended &&
+        _session!.state != CallState.failed) {
+      _session = _session!.copyWith(state: CallState.active);
+    }
+    ApiLogger.instance.logEvent('CALL', 'remote accepted / joined');
+    notifyListeners();
+  }
+
+  /// Отмена/завершение на сервере после появления callId (session может быть уже null).
   void _hangupCallOnServer(String callId) {
     if (callId.isEmpty || callId == 'pending') return;
-    _signaling.sendHangup(callId: callId);
-    ApiLogger.instance.logEvent('CALL', 'deferred hangup $callId');
+    final deferred = _deferredEnd;
+    final dlgId =
+        deferred?.dlgId ?? _session?.dlgId ?? _session?.groupId;
+    final peers = deferred?.peers ??
+        _session?.peers
+            .map((p) => p.userId.trim())
+            .where((e) => e.isNotEmpty)
+            .toList() ??
+        const <String>[];
+    final preferCancel = deferred?.preferCancel == true ||
+        (_session != null &&
+            !_isAnswered(_session!) &&
+            _session!.direction == CallDirection.outgoing);
+
+    if (preferCancel) {
+      // Не слать hangup — иначе сервер call_msg type=talk.
+      _signaling.sendCancel(
+        callId: callId,
+        dlgId: dlgId,
+        callees: peers,
+      );
+    } else {
+      _signaling.sendHangup(
+        callId: callId,
+        callees: peers,
+        dlgId: dlgId,
+      );
+    }
+    ApiLogger.instance.logEvent(
+      'CALL',
+      'server end callId=$callId cancel=$preferCancel peers=${peers.length}',
+    );
+  }
+
+  /// Если пришёл callId после локальной отмены — дослать cancel/hangup.
+  void _flushDeferredEndIfNeeded(String? callId) {
+    if (!_endRequested) return;
+    final id = (callId ?? _deferredEnd?.callId)?.trim();
+    if (id == null || id.isEmpty || id == 'pending') return;
+    _deferredEnd = (_deferredEnd ??
+            const _DeferredCallEnd(preferCancel: true, peers: []))
+        .copyWith(callId: id);
+    _hangupCallOnServer(id);
+    _endRequested = false;
+    _deferredEnd = null;
+    _localEnding = false;
   }
 
   Future<void> toggleMute() async {
@@ -404,12 +568,30 @@ class CallManager extends ChangeNotifier {
 
     if (type == 'call.token' || type == 'token' || type == 'media') {
       if (_endRequested) {
-        final callId = _extractCallId(map);
-        if (callId != null) _hangupCallOnServer(callId);
-        _endRequested = false;
+        _flushDeferredEndIfNeeded(_extractCallId(map));
         return;
       }
       unawaited(_connectLiveKit(map));
+      return;
+    }
+
+    // Флаг e2ee без ключа — только индикация (ключ приходит в call.token).
+    if (type == 'call.started' ||
+        type == 'call.ring' ||
+        type == 'started' ||
+        type == 'ring') {
+      if (_session != null && parseCallE2eeFlag(map)) {
+        _session = _session!.copyWith(e2eeEnabled: true);
+        notifyListeners();
+      }
+      return;
+    }
+
+    if (type == 'call.accept' ||
+        type == 'accept' ||
+        type == 'call.accepted' ||
+        type == 'accepted') {
+      if (_session != null) _markRemoteAccepted();
       return;
     }
 
@@ -452,8 +634,29 @@ class CallManager extends ChangeNotifier {
         type == 'call.ended' ||
         type == 'call.busy') {
       final callId = _extractCallId(map);
-      if (_incoming != null &&
-          (callId == null || callId == _incoming!.callId)) {
+      final isCancel = type.contains('cancel');
+      final isReject = type.contains('reject');
+      final isBusy = type.contains('busy');
+
+      if (_incomingMatchesEnd(callId, map)) {
+        final invite = _incoming!;
+        // Входящий ещё не принят: cancel инициатором → cancelled; иначе missed.
+        final endedByCaller = isCancel ||
+            type.contains('hangup') ||
+            type.contains('ended');
+        _emitCallChatResult(
+          CallChatResult(
+            dlgId: invite.dlgId ?? invite.groupId,
+            callId: invite.callId,
+            media: invite.video ? 'video' : 'audio',
+            type: endedByCaller ? 'cancelled' : 'missed',
+            rejectUsrId: endedByCaller ? invite.callerId : '',
+            callerId: invite.callerId,
+            callerName: invite.callerName,
+            outgoing: false,
+            peerUserId: invite.callerId,
+          ),
+        );
         _incoming = null;
         notifyListeners();
       }
@@ -461,7 +664,17 @@ class CallManager extends ChangeNotifier {
           (callId == null ||
               callId == _session!.callId ||
               _session!.callId == 'pending')) {
+        final session = _session!;
+        _emitCallChatResult(
+          _resultForRemoteEnd(
+            session,
+            cancelledByPeer: isCancel || isReject || isBusy,
+            rejectedByCallee: isReject || isBusy,
+          ),
+        );
         _endRequested = false;
+        _deferredEnd = null;
+        _localEnding = false;
         unawaited(hangup(local: false));
       }
       return;
@@ -481,8 +694,12 @@ class CallManager extends ChangeNotifier {
     }
 
     if (type == 'participant_joined' ||
-        type == 'participant_left' ||
-        type == 'call.participant_joined' ||
+        type == 'call.participant_joined') {
+      if (_session != null) _markRemoteAccepted();
+      notifyListeners();
+      return;
+    }
+    if (type == 'participant_left' ||
         type == 'call.participant_left') {
       notifyListeners();
     }
@@ -505,9 +722,17 @@ class CallManager extends ChangeNotifier {
   bool _maybeBindCallId(Map<String, dynamic> map) {
     final callId = _extractCallId(map);
     if (callId == null) return false;
-    final session = _session;
-    if (session == null) return false;
 
+    // Session уже очищена после локальной отмены — всё равно дослать cancel.
+    if (_session == null) {
+      if (_endRequested) {
+        _flushDeferredEndIfNeeded(callId);
+        return true;
+      }
+      return false;
+    }
+
+    final session = _session!;
     if (session.callId == 'pending' || session.callId.isEmpty) {
       _session = session.copyWith(callId: callId);
       notifyListeners();
@@ -520,10 +745,29 @@ class CallManager extends ChangeNotifier {
               _session!.callId != 'pending')
           ? _session!.callId
           : callId;
-      _hangupCallOnServer(id);
-      _endRequested = false;
+      _flushDeferredEndIfNeeded(id);
       unawaited(hangup(local: false));
       return true;
+    }
+    return false;
+  }
+
+  bool _incomingMatchesEnd(String? callId, Map<String, dynamic> map) {
+    final inv = _incoming;
+    if (inv == null) return false;
+    if (callId == null || callId.isEmpty) return true;
+    if (callId == inv.callId) return true;
+    final payload = map['payload'];
+    final dlg = (map['dlgId'] ??
+            map['dlg_id'] ??
+            (payload is Map
+                ? (payload['dlgId'] ?? payload['dlg_id'])
+                : null))
+        ?.toString()
+        .trim();
+    if (dlg != null && dlg.isNotEmpty) {
+      final invDlg = (inv.dlgId ?? inv.groupId)?.trim();
+      if (invDlg != null && invDlg.isNotEmpty && invDlg == dlg) return true;
     }
     return false;
   }
@@ -531,7 +775,10 @@ class CallManager extends ChangeNotifier {
   void _presentIncoming(IncomingCallInvite invite) {
     if (_incoming?.callId == invite.callId) return;
     if (hasActiveCall && _session?.callId != invite.callId) {
-      _signaling.sendReject(callId: invite.callId);
+      _signaling.sendReject(
+        callId: invite.callId,
+        dlgId: invite.dlgId ?? invite.groupId,
+      );
       return;
     }
     _incoming = invite;
@@ -576,10 +823,7 @@ class CallManager extends ChangeNotifier {
     }
 
     if (_endRequested) {
-      if (callId != null && callId.isNotEmpty) {
-        _hangupCallOnServer(callId);
-      }
-      _endRequested = false;
+      _flushDeferredEndIfNeeded(callId);
       return;
     }
 
@@ -600,31 +844,43 @@ class CallManager extends ChangeNotifier {
       _session = _session!.copyWith(mediaType: CallMediaType.video);
     }
 
+    final e2ee = parseCallE2eeFlag(map) || (_session?.e2eeEnabled ?? false);
+    final e2eeKey = parseCallE2eeKey(map);
+
     _session = _session!.copyWith(
       state: CallState.connectingMedia,
       livekitUrl: url,
       livekitToken: token,
       livekitRoom: roomName,
+      e2eeEnabled: e2ee && e2eeKey != null,
     );
     notifyListeners();
 
     try {
       await _leaveRoom(keepSession: true);
       if (_endRequested || _session == null) {
-        if (callId != null && callId.isNotEmpty) {
-          _hangupCallOnServer(callId);
-        }
-        _endRequested = false;
+        _flushDeferredEndIfNeeded(callId);
         return;
       }
+
+      E2EEOptions? e2eeOptions;
+      if (e2ee && e2eeKey != null) {
+        // Shared-key frame encryption (без data-channel), как iOS CallManager.joinRoom.
+        final keyProvider = await BaseKeyProvider.create(sharedKey: true);
+        await keyProvider.setSharedKey(e2eeKey);
+        e2eeOptions = E2EEOptions(keyProvider: keyProvider);
+        ApiLogger.instance.logEvent('CALL', 'E2EE enabled for call');
+      }
+
       final room = Room(
-        roomOptions: const RoomOptions(
+        roomOptions: RoomOptions(
           adaptiveStream: true,
           dynacast: true,
-          defaultAudioPublishOptions: AudioPublishOptions(
+          e2eeOptions: e2eeOptions,
+          defaultAudioPublishOptions: const AudioPublishOptions(
             name: 'microphone',
           ),
-          defaultCameraCaptureOptions: CameraCaptureOptions(
+          defaultCameraCaptureOptions: const CameraCaptureOptions(
             maxFrameRate: 30,
           ),
         ),
@@ -634,13 +890,34 @@ class CallManager extends ChangeNotifier {
       _roomListener!
         ..on<RoomConnectedEvent>((_) {
           if (_endRequested || _session == null) return;
-          _session = _session?.copyWith(state: CallState.active);
+          // Подключение к комнате ≠ ответ собеседника (caller получает token сразу).
+          if (_remoteAccepted ||
+              _session!.direction == CallDirection.incoming) {
+            _connectedAt ??= DateTime.now();
+            _session = _session?.copyWith(state: CallState.active);
+          } else if (_session!.state == CallState.ringing) {
+            _session =
+                _session?.copyWith(state: CallState.connectingMedia);
+          }
           notifyListeners();
         })
         ..on<RoomDisconnectedEvent>((_) {
+          if (_localEnding || _endRequested || _chatResultSent) {
+            unawaited(hangup(local: false));
+            return;
+          }
+          final session = _session;
+          if (session != null) {
+            _emitCallChatResult(
+              _resultForRemoteEnd(session, cancelledByPeer: false),
+            );
+          }
           unawaited(hangup(local: false));
         })
-        ..on<ParticipantConnectedEvent>((_) => notifyListeners())
+        ..on<ParticipantConnectedEvent>((_) {
+          _markRemoteAccepted();
+          notifyListeners();
+        })
         ..on<ParticipantDisconnectedEvent>((_) => notifyListeners())
         ..on<TrackSubscribedEvent>((_) => notifyListeners())
         ..on<TrackUnsubscribedEvent>((_) => notifyListeners())
@@ -650,10 +927,7 @@ class CallManager extends ChangeNotifier {
 
       if (_endRequested || _session == null) {
         await _leaveRoom();
-        if (callId != null && callId.isNotEmpty) {
-          _hangupCallOnServer(callId);
-        }
-        _endRequested = false;
+        _flushDeferredEndIfNeeded(callId);
         return;
       }
 
@@ -662,11 +936,24 @@ class CallManager extends ChangeNotifier {
         await room.localParticipant?.setCameraEnabled(true);
       }
 
-      _session = _session?.copyWith(state: CallState.active);
-      notifyListeners();
+      // Remote уже в комнате (accept раньше connect).
+      if (room.remoteParticipants.isNotEmpty) {
+        _markRemoteAccepted();
+      } else if (_session?.direction == CallDirection.incoming) {
+        _connectedAt ??= DateTime.now();
+        _session = _session?.copyWith(state: CallState.active);
+        notifyListeners();
+      } else {
+        // Исходящий: ждём remote — UI остаётся «звоним…».
+        if (_session?.state == CallState.ringing) {
+          _session =
+              _session?.copyWith(state: CallState.connectingMedia);
+        }
+        notifyListeners();
+      }
     } catch (e, st) {
       if (_endRequested || _session == null) {
-        _endRequested = false;
+        _flushDeferredEndIfNeeded(callId);
         return;
       }
       ApiLogger.instance.logEvent('CALL', 'LiveKit connect failed: $e\n$st');
@@ -676,6 +963,149 @@ class CallManager extends ChangeNotifier {
       );
       notifyListeners();
     }
+  }
+
+  void _emitCallChatResult(CallChatResult result) {
+    if (_chatResultSent) return;
+    final dlg = (result.dlgId ?? '').trim();
+    final peer = result.peerUserId.trim();
+    // dlgId может быть пуст — AppState найдёт диалог по peerUserId.
+    if ((dlg.isEmpty || dlg == '0') && peer.isEmpty) {
+      ApiLogger.instance.logEvent(
+        'CALL',
+        'chat result skipped: no dlg/peer callId=${result.callId}',
+      );
+      return;
+    }
+    _chatResultSent = true;
+    try {
+      onCallChatResult?.call(result);
+    } catch (e) {
+      ApiLogger.instance.logEvent('CALL', 'onCallChatResult failed: $e');
+    }
+  }
+
+  CallChatResult _resultForLocalHangup(CallSession session) {
+    final me = _localUserId ?? '';
+    final answered = _isAnswered(session);
+    final media = session.mediaType == CallMediaType.video ? 'video' : 'audio';
+    final peerUserId =
+        session.peers.isNotEmpty ? session.peers.first.userId : '';
+    final callerId = session.direction == CallDirection.outgoing
+        ? me
+        : peerUserId;
+    final callerName = session.direction == CallDirection.outgoing
+        ? (_localUserName ?? '')
+        : (session.peers.isNotEmpty ? session.peers.first.name : session.title);
+    final duration = _connectedAt == null
+        ? 0
+        : DateTime.now().difference(_connectedAt!).inSeconds;
+    // groupId часто = dlgId для 1:1 invite — используем как fallback.
+    final dlgId = session.dlgId ?? session.groupId;
+
+    if (answered) {
+      return CallChatResult(
+        dlgId: dlgId,
+        callId: session.callId,
+        media: media,
+        type: 'talk',
+        durationSec: duration > 0 ? duration : 0,
+        callerId: callerId,
+        callerName: callerName,
+        outgoing: session.direction == CallDirection.outgoing,
+        peerUserId: peerUserId,
+      );
+    }
+
+    if (session.direction == CallDirection.outgoing) {
+      return CallChatResult(
+        dlgId: dlgId,
+        callId: session.callId == 'pending' ? '' : session.callId,
+        media: media,
+        type: 'cancelled',
+        rejectUsrId: me,
+        callerId: callerId.isNotEmpty ? callerId : me,
+        callerName: callerName,
+        outgoing: true,
+        peerUserId: peerUserId,
+      );
+    }
+    return CallChatResult(
+      dlgId: dlgId,
+      callId: session.callId == 'pending' ? '' : session.callId,
+      media: media,
+      type: 'missed',
+      callerId: callerId,
+      callerName: callerName,
+      outgoing: false,
+      peerUserId: peerUserId,
+    );
+  }
+
+  CallChatResult _resultForRemoteEnd(
+    CallSession session, {
+    required bool cancelledByPeer,
+    bool rejectedByCallee = false,
+  }) {
+    final me = _localUserId ?? '';
+    final media = session.mediaType == CallMediaType.video ? 'video' : 'audio';
+    final peerId =
+        session.peers.isNotEmpty ? session.peers.first.userId : '';
+    final peerName =
+        session.peers.isNotEmpty ? session.peers.first.name : session.title;
+    final callerId = session.direction == CallDirection.outgoing ? me : peerId;
+    final callerName = session.direction == CallDirection.outgoing
+        ? (_localUserName ?? '')
+        : peerName;
+    final answered = _isAnswered(session);
+    final duration = _connectedAt == null
+        ? 0
+        : DateTime.now().difference(_connectedAt!).inSeconds;
+    final dlgId = session.dlgId ?? session.groupId;
+    final safeCallId =
+        session.callId == 'pending' ? '' : session.callId;
+
+    if (answered) {
+      return CallChatResult(
+        dlgId: dlgId,
+        callId: safeCallId,
+        media: media,
+        type: 'talk',
+        durationSec: duration > 0 ? duration : 0,
+        callerId: callerId,
+        callerName: callerName,
+        outgoing: session.direction == CallDirection.outgoing,
+        peerUserId: peerId,
+      );
+    }
+
+    if (cancelledByPeer) {
+      final rejectId = rejectedByCallee
+          ? (session.direction == CallDirection.outgoing ? peerId : me)
+          : callerId;
+      return CallChatResult(
+        dlgId: dlgId,
+        callId: safeCallId,
+        media: media,
+        type: 'cancelled',
+        rejectUsrId: rejectId,
+        callerId: callerId,
+        callerName: callerName,
+        outgoing: session.direction == CallDirection.outgoing,
+        peerUserId: peerId,
+      );
+    }
+
+    return CallChatResult(
+      dlgId: dlgId,
+      callId: safeCallId,
+      media: media,
+      type: 'missed',
+      callerId: callerId,
+      callerName: callerName,
+      outgoing: session.direction == CallDirection.outgoing,
+      peerUserId: peerId,
+    );
   }
 
   Future<void> _leaveRoom({bool keepSession = false}) async {
@@ -698,5 +1128,33 @@ class CallManager extends ChangeNotifier {
     unawaited(shutdown());
     _signaling.dispose();
     super.dispose();
+  }
+}
+
+class _DeferredCallEnd {
+  final bool preferCancel;
+  final List<String> peers;
+  final String? dlgId;
+  final String? callId;
+
+  const _DeferredCallEnd({
+    required this.preferCancel,
+    required this.peers,
+    this.dlgId,
+    this.callId,
+  });
+
+  _DeferredCallEnd copyWith({
+    bool? preferCancel,
+    List<String>? peers,
+    String? dlgId,
+    String? callId,
+  }) {
+    return _DeferredCallEnd(
+      preferCancel: preferCancel ?? this.preferCancel,
+      peers: peers ?? this.peers,
+      dlgId: dlgId ?? this.dlgId,
+      callId: callId ?? this.callId,
+    );
   }
 }
