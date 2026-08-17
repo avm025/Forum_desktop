@@ -33,6 +33,8 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
   @override
   void initState() {
     super.initState();
+    // Синхронный peek — без вспышки placeholder при первом кадре / ресайзе.
+    _cachedFile = MediaThumbCache.peekSync(widget.file);
     _load();
   }
 
@@ -43,16 +45,29 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         (oldWidget.height - widget.height).abs() > 0.5;
     if (oldWidget.file.hash != widget.file.hash ||
         oldWidget.file.url != widget.file.url) {
-      _cachedFile = null;
+      _cachedFile = MediaThumbCache.peekSync(widget.file);
       _error = false;
+      _loading = false;
       _load();
     } else if (sizeChanged && mounted) {
+      // Только перерисовать с новыми width/height — кэш не сбрасывать.
       setState(() {});
     }
   }
 
   Future<void> _load() async {
     if (!MediaThumbCache.needsRemoteThumbnail(widget.file)) {
+      return;
+    }
+
+    if (_cachedFile != null) {
+      // Уже есть из peekSync — подтянуть ensure на фоне без placeholder.
+      try {
+        final file = await MediaThumbCache.ensureThumbnail(widget.file);
+        if (mounted && _cachedFile?.path != file.path) {
+          setState(() => _cachedFile = file);
+        }
+      } catch (_) {}
       return;
     }
 
@@ -92,17 +107,18 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
     if (file.bytes != null && file.bytes!.isNotEmpty) {
       return Image.memory(
         file.bytes!,
-        key: ValueKey('${file.hash}_${w.round()}x${h.round()}'),
+        key: ValueKey('bytes_${file.hash}'),
         width: w,
         height: h,
         fit: widget.fit,
+        gaplessPlayback: true,
       );
     }
 
     if (_cachedFile != null) {
       return Image.file(
         _cachedFile!,
-        key: ValueKey('${file.hash}_${w.round()}x${h.round()}'),
+        key: ValueKey('file_${file.hash}'),
         width: w,
         height: h,
         fit: widget.fit,

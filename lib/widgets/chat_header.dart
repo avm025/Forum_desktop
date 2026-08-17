@@ -57,6 +57,7 @@ class ChatHeader extends StatelessWidget {
             name: dialog.chatName,
             avatarUrl: dialog.avatar,
             avatarColor: dialog.avatarColor,
+            colAvaId: dialog.colAvaId,
             online: dialog.online,
             size: 36,
           ),

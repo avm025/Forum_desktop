@@ -12,13 +12,19 @@ class MediaThumbCache {
   MediaThumbCache._();
 
   static final _pending = <String, Future<File>>{};
+  static final _knownPaths = <String, String>{};
+  static String? _basePath;
 
   static Future<Directory> _cacheDir() async {
+    if (_basePath != null) {
+      return Directory(_basePath!);
+    }
     final base = await getApplicationSupportDirectory();
     final dir = Directory('${base.path}/forum_media_thumbs');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
+    _basePath = dir.path;
     return dir;
   }
 
@@ -39,9 +45,38 @@ class MediaThumbCache {
     return File('${dir.path}/${cacheKey(file)}.jpg');
   }
 
+  static void _remember(File file, MediaFile media) {
+    _knownPaths[cacheKey(media)] = file.path;
+  }
+
+  /// Синхронный peek для DnD-превью (путь уже известен после показа в чате).
+  static File? peekSync(MediaFile file) {
+    final key = cacheKey(file);
+    final remembered = _knownPaths[key];
+    if (remembered != null) {
+      try {
+        final f = File(remembered);
+        if (f.existsSync() && f.lengthSync() > 0) return f;
+      } catch (_) {}
+    }
+    final base = _basePath;
+    if (base == null) return null;
+    final f = File('$base/$key.jpg');
+    try {
+      if (f.existsSync() && f.lengthSync() > 0) {
+        _knownPaths[key] = f.path;
+        return f;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   static Future<File?> getIfExists(MediaFile file) async {
     final f = await _cacheFile(file);
-    if (await f.exists() && await f.length() > 0) return f;
+    if (await f.exists() && await f.length() > 0) {
+      _remember(f, file);
+      return f;
+    }
     return null;
   }
 
@@ -65,14 +100,19 @@ class MediaThumbCache {
 
   static Future<File> _ensureImpl(MediaFile file) async {
     final out = await _cacheFile(file);
-    if (await out.exists() && await out.length() > 0) return out;
+    if (await out.exists() && await out.length() > 0) {
+      _remember(out, file);
+      return out;
+    }
 
     if (file.isVideo) {
       await _ensureVideoThumbnail(file, out);
+      _remember(out, file);
       return out;
     }
 
     await _downloadPhotoThumbnail(file, out);
+    _remember(out, file);
     return out;
   }
 

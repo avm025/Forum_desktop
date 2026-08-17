@@ -1,13 +1,18 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../state/app_state.dart';
 import '../theme/app_colors.dart';
-import 'cached_forum_image.dart';
 
-/// Круглый аватар: фото (если есть), иначе градиент + инициалы.
+/// Круглый аватар как в Forum iOS `DialogsTableViewCell`:
+/// фото, иначе градиент из `ava_col` + инициалы имени.
 class AvatarWidget extends StatelessWidget {
   final String name;
   final String avatarUrl;
   final List<String>? avatarColor;
+  /// Id палитры (`usr*_col_ava_id` / `grp_col_ava_id`), по умолчанию 1.
+  final int colAvaId;
   final double size;
   final bool online;
 
@@ -16,60 +21,107 @@ class AvatarWidget extends StatelessWidget {
     required this.name,
     this.avatarUrl = '',
     this.avatarColor,
+    this.colAvaId = 1,
     this.size = 56,
     this.online = false,
   });
 
+  /// Как iOS: первая буква каждого слова имени.
   String get _initials {
-    final parts =
+    final words =
         name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
-    if (parts.isEmpty) return '?';
-    if (parts.length == 1) {
-      return parts.first.characters.first.toUpperCase();
+    if (words.isEmpty) return '?';
+    final buf = StringBuffer();
+    for (final word in words) {
+      final chars = word.characters;
+      if (chars.isEmpty) continue;
+      buf.write(chars.first.toUpperCase());
     }
-    return (parts[0].characters.first + parts[1].characters.first)
-        .toUpperCase();
+    final result = buf.toString();
+    return result.isEmpty ? '?' : result;
+  }
+
+  List<Color> _gradientColors(BuildContext context) {
+    // Пара hex с сервера — только если уже градиент из 2 цветов.
+    final fromProp = AppColors.parseHexList(avatarColor);
+    if (fromProp != null && fromProp.length >= 2) return fromProp;
+
+    try {
+      final state = context.read<AppState>();
+      final isDark = Theme.of(context).brightness == Brightness.dark;
+      final id = colAvaId > 0 ? colAvaId : 1;
+      final hex = state.appearanceResolver.avatarHexFor(
+        isDark: isDark,
+        colorId: id,
+      );
+      if (hex.length >= 2) {
+        return [
+          AppColors.parseHex(hex[0]),
+          AppColors.parseHex(hex[1]),
+        ];
+      }
+      final palette = state.database.avatarById(id);
+      if (palette != null) {
+        final pair = palette.hexForDark(isDark);
+        return [AppColors.parseHex(pair[0]), AppColors.parseHex(pair[1])];
+      }
+    } catch (_) {
+      // Вне Provider — fallback ниже.
+    }
+
+    return AppColors.avatarGradientFor(name.isNotEmpty ? name : '$colAvaId');
+  }
+
+  Widget _defaultAvatar(List<Color> gradient) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        // iOS: горизонтальный градиент (start 0.0 → end 0.2 по X).
+        gradient: LinearGradient(
+          colors: gradient.length >= 2
+              ? gradient
+              : [gradient.first, gradient.first],
+          begin: Alignment.centerLeft,
+          end: const Alignment(0.4, 0),
+        ),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        _initials,
+        maxLines: 1,
+        overflow: TextOverflow.clip,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: size * 0.32,
+          fontWeight: FontWeight.w600,
+          height: 1,
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final gradient =
-        AppColors.parseHexList(avatarColor) ?? AppColors.avatarGradientFor(name);
-    final hasPhoto = avatarUrl.isNotEmpty;
+    final gradient = _gradientColors(context);
+    final url = avatarUrl.trim();
+    final hasPhoto = url.isNotEmpty;
 
     Widget avatar;
     if (hasPhoto) {
       avatar = ClipOval(
-        child: CachedForumImage(
-          url: avatarUrl,
+        child: CachedNetworkImage(
+          imageUrl: url,
           width: size,
           height: size,
+          fit: BoxFit.cover,
+          placeholder: (_, __) => _defaultAvatar(gradient),
+          errorWidget: (_, __, ___) => _defaultAvatar(gradient),
         ),
       );
     } else {
-      avatar = Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: LinearGradient(
-            colors: gradient.length >= 2
-                ? gradient
-                : [gradient.first, gradient.first],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        alignment: Alignment.center,
-        child: Text(
-          _initials,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: size * 0.36,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      );
+      avatar = _defaultAvatar(gradient);
     }
 
     if (!online) return avatar;

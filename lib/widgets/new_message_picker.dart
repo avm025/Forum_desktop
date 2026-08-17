@@ -197,6 +197,8 @@ class _ContactRow extends StatelessWidget {
                   AvatarWidget(
                     name: contact.chatName,
                     avatarUrl: contact.avatar,
+                    avatarColor: contact.avatarColor,
+                    colAvaId: contact.colAvaId,
                     size: 38,
                   ),
                   const SizedBox(width: 12),

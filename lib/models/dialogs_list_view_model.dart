@@ -9,6 +9,8 @@ class DialogsListViewModel {
   String? id;
   final int? ai;
   final String avatar;
+  /// Id палитры градиента аватара (`usr*_col_ava_id` / `grp_col_ava_id`), как iOS.
+  final int colAvaId;
   List<String>? avatarColor;
   String chatName;
   String last_msg;
@@ -34,6 +36,7 @@ class DialogsListViewModel {
     this.id,
     this.ai,
     this.avatar = '',
+    this.colAvaId = 1,
     this.avatarColor,
     this.chatName = '',
     this.last_msg = '',

@@ -326,14 +326,17 @@ class _MediaGridState extends State<MediaGrid> {
     if (hasBytes) {
       content = Image.memory(
         file.bytes!,
-        key: ValueKey('${file.hash}_${width.round()}x${height.round()}'),
+        key: ValueKey('mem_${file.hash}'),
         fit: BoxFit.cover,
         width: width,
         height: height,
+        gaplessPlayback: true,
       );
     } else if (hasUrl || MediaThumbCache.needsRemoteThumbnail(file)) {
       content = MediaThumbTile(
-        key: ValueKey('${file.hash}_${width.round()}x${height.round()}'),
+        // Ключ без размера: иначе при ресайзе окна State сбрасывается
+        // и на мгновение показывается placeholder.
+        key: ValueKey('thumb_${file.hash.isNotEmpty ? file.hash : file.url}'),
         file: file,
         width: width,
         height: height,

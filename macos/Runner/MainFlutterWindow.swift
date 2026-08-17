@@ -18,6 +18,11 @@ class MainFlutterWindow: NSWindow {
       with: flutterViewController.registrar(forPlugin: "ForumPdfPlugin")
     )
 
+    ForumCursorPlugin.register(
+      with: flutterViewController.registrar(forPlugin: "ForumCursorPlugin")
+    )
+    ForumCursorPlugin.attach(flutterView: flutterViewController.view)
+
     super.awakeFromNib()
 
     title = "Forum"

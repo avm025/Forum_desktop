@@ -20,9 +20,69 @@ class DialogMapper {
     String? currentUserId,
   }) {
     final isGrp = _parseInt(json['is_grp']) == 1;
-    final avatarPath =
-        (json['img_url'] ?? json['usr1_ava'] ?? '').toString();
-    final colorHex = (json['color'] ?? json['usr1_color'] ?? '').toString();
+    final dlgId =
+        json['dlg_id']?.toString() ?? json['id']?.toString() ?? '';
+    final usr1Id = json['usr1_id']?.toString() ?? '';
+    final usr2Id = json['usr2_id']?.toString() ?? '';
+
+    // Как iOS DataConverter: для 1:1 берём поля собеседника, не usr1_*.
+    var avatarPath =
+        (json['img_url'] ?? json['ava'] ?? '').toString().trim();
+    var chatName = json['name']?.toString() ?? '';
+    var usrId = json['usr_id']?.toString();
+    var phone = json['phone']?.toString();
+    var colorHex = (json['color'] ?? '').toString().trim();
+    var colAvaId = _parseInt(
+      json['col_ava_id'] ?? json['grp_col_ava_id'],
+      fallback: 1,
+    );
+    if (colAvaId <= 0) colAvaId = 1;
+
+    if (!isGrp &&
+        !DialogsListViewModel.isPlaceholderDlgId(dlgId) &&
+        usr1Id.isNotEmpty &&
+        usr2Id.isNotEmpty) {
+      final meIsUsr1 = _sameUserId(currentUserId, usr1Id);
+      if (meIsUsr1) {
+        if (chatName.trim().isEmpty) {
+          chatName = json['usr2_name']?.toString() ?? '';
+        }
+        phone = json['usr2_phone']?.toString() ?? phone;
+        usrId = usr2Id;
+        final peerAva = (json['usr2_ava'] ?? '').toString().trim();
+        if (peerAva.isNotEmpty) avatarPath = peerAva;
+        colAvaId = _parseInt(json['usr2_col_ava_id'], fallback: colAvaId);
+        final peerColor = (json['usr2_color'] ?? '').toString().trim();
+        if (peerColor.isNotEmpty) colorHex = peerColor;
+      } else {
+        if (chatName.trim().isEmpty) {
+          chatName = json['usr1_name']?.toString() ?? '';
+        }
+        phone = json['usr1_phone']?.toString() ?? phone;
+        usrId = usr1Id;
+        final peerAva = (json['usr1_ava'] ?? '').toString().trim();
+        if (peerAva.isNotEmpty) avatarPath = peerAva;
+        colAvaId = _parseInt(json['usr1_col_ava_id'], fallback: colAvaId);
+        final peerColor = (json['usr1_color'] ?? '').toString().trim();
+        if (peerColor.isNotEmpty) colorHex = peerColor;
+      }
+    } else if (!isGrp) {
+      // Контакт без диалога (dlg_id=0) или неполный 1:1.
+      final fallbackAva = (json['usr1_ava'] ?? json['usr2_ava'] ?? '')
+          .toString()
+          .trim();
+      if (avatarPath.isEmpty && fallbackAva.isNotEmpty) {
+        avatarPath = fallbackAva;
+      }
+      phone ??= json['usr1_phone']?.toString() ?? json['usr2_phone']?.toString();
+      if ((usrId == null || usrId.isEmpty) && usr1Id.isNotEmpty) {
+        usrId = _sameUserId(currentUserId, usr1Id) ? usr2Id : usr1Id;
+        if (usrId.isEmpty) usrId = usr1Id;
+      }
+    }
+
+    // Как iOS: selectedAvatarColorId по умолчанию 1.
+    if (colAvaId <= 0) colAvaId = 1;
 
     final last = _parseLastMsg(
       json['last_msg'],
@@ -31,12 +91,16 @@ class DialogMapper {
     );
 
     return DialogsListViewModel(
-      id: json['dlg_id']?.toString() ?? json['id']?.toString() ?? '',
-      usr_id: json['usr_id']?.toString(),
+      id: dlgId,
+      usr_id: usrId,
       ai: _parseInt(json['ai']),
-      avatar: ApiConfig.mediaUrl(avatarPath),
-      avatarColor: colorHex.isNotEmpty ? ['#$colorHex'] : null,
-      chatName: json['name']?.toString() ?? '',
+      // CDN fileServer (как GL.file_server), не API-хост :7770.
+      avatar: ApiConfig.resolveAssetUrl(avatarPath),
+      colAvaId: colAvaId,
+      avatarColor: colorHex.isNotEmpty
+          ? ['#${colorHex.replaceFirst('#', '')}']
+          : null,
+      chatName: chatName,
       last_msg: last.text,
       last_msg_id: last.id,
       last_msg_fr_id: last.frId.isNotEmpty
@@ -53,11 +117,11 @@ class DialogMapper {
       chatType: isGrp ? ChatType.groupChat : ChatType.privateChat,
       isGrp: isGrp,
       pin: _parseInt(json['pin']),
-      phone: json['usr1_phone']?.toString(),
+      phone: phone,
       fav: _parseInt(json['fav']) == 1,
       online: _parseInt(json['online']) == 1,
       groupAditionalInfo: GroupAditionalInfoModel(
-        colAvalId: _parseInt(json['col_ava_id']),
+        colAvalId: colAvaId,
         desc: json['about']?.toString(),
         nick: json['name']?.toString(),
       ),
@@ -298,11 +362,21 @@ class DialogMapper {
         (t.contains('"desc"') && t.contains('"kind"'));
   }
 
-  static int _parseInt(dynamic v) {
-    if (v == null) return 0;
+  static int _parseInt(dynamic v, {int fallback = 0}) {
+    if (v == null) return fallback;
     if (v is int) return v;
-    if (v is String) return int.tryParse(v) ?? 0;
-    return 0;
+    if (v is String) return int.tryParse(v) ?? fallback;
+    return fallback;
+  }
+
+  static bool _sameUserId(String? a, String? b) {
+    final x = (a ?? '').trim();
+    final y = (b ?? '').trim();
+    if (x.isEmpty || y.isEmpty) return false;
+    if (x == y) return true;
+    final xi = int.tryParse(x);
+    final yi = int.tryParse(y);
+    return xi != null && yi != null && xi == yi;
   }
 
   static String _formatTime(String iso) {
