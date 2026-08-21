@@ -323,7 +323,7 @@ class _MediaGridState extends State<MediaGrid> {
 
     Widget content;
 
-    if (hasBytes) {
+    if (hasBytes && file.bytes!.length < 2 * 1024 * 1024) {
       content = Image.memory(
         file.bytes!,
         key: ValueKey('mem_${file.hash}'),
@@ -331,12 +331,18 @@ class _MediaGridState extends State<MediaGrid> {
         width: width,
         height: height,
         gaplessPlayback: true,
+        cacheWidth: (width * MediaQuery.devicePixelRatioOf(context)).round(),
+        cacheHeight: (height * MediaQuery.devicePixelRatioOf(context)).round(),
       );
-    } else if (hasUrl || MediaThumbCache.needsRemoteThumbnail(file)) {
+    } else if (hasUrl ||
+        (file.URL != null && file.URL!.trim().isNotEmpty) ||
+        MediaThumbCache.needsRemoteThumbnail(file)) {
       content = MediaThumbTile(
         // Ключ без размера: иначе при ресайзе окна State сбрасывается
         // и на мгновение показывается placeholder.
-        key: ValueKey('thumb_${file.hash.isNotEmpty ? file.hash : file.url}'),
+        key: ValueKey(
+          'thumb_${file.hash.isNotEmpty ? file.hash : (file.URL ?? file.url)}',
+        ),
         file: file,
         width: width,
         height: height,

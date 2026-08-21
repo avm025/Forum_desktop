@@ -8,6 +8,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/auth_models.dart';
 import '../models/device_session.dart';
 import '../models/dialog_group.dart';
+import '../models/dlg_info_member.dart';
 import '../models/emoji_category.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/msg_read_entry.dart';
@@ -565,6 +566,24 @@ class ForumApiClient {
 
     final resp = await sendWs({'type': 'dlg_info', 'data': data});
     return _extractOwnTypingDraft(resp, usrId);
+  }
+
+  /// WS `dlg_info` — участники и метаданные (как iOS AnotherProfile).
+  Future<DlgInfoResult> fetchDlgInfo({
+    required String dlgId,
+    String? currentUserId,
+  }) async {
+    final id = dlgId.trim();
+    if (id.isEmpty || id == '0') return const DlgInfoResult();
+
+    final data = <String, dynamic>{'dlg_id': id};
+    // iOS также шлёт grp_id для групп.
+    data['grp_id'] = id;
+    final usrId = currentUserId?.trim() ?? '';
+    if (usrId.isNotEmpty) data['usr_id'] = usrId;
+
+    final resp = await sendWs({'type': 'dlg_info', 'data': data});
+    return DlgInfoResult.fromResponse(resp);
   }
 
   /// WS `msg_read_list` — кто прочитал сообщение и когда.

@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../models/chat_type.dart';
 import '../models/dialogs_list_view_model.dart';
+import '../screens/peer_profile/peer_profile_screen.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import 'avatar_widget.dart';
@@ -25,6 +26,13 @@ class ChatHeader extends StatelessWidget {
       return 'группа';
     }
     return 'Был(а) недавно';
+  }
+
+  void _openPeerProfile(BuildContext context) {
+    if (dialog.fav) return;
+    final id = dialog.id?.trim() ?? '';
+    if (id.isEmpty || id == '0') return;
+    PeerProfileScreen.open(context, dialog);
   }
 
   @override
@@ -53,38 +61,48 @@ class ChatHeader extends StatelessWidget {
               onPressed: context.read<AppState>().clearSelection,
               icon: Icon(Icons.arrow_back, color: p.text1),
             ),
-          AvatarWidget(
-            name: dialog.chatName,
-            avatarUrl: dialog.avatar,
-            avatarColor: dialog.avatarColor,
-            colAvaId: dialog.colAvaId,
-            online: dialog.online,
-            size: 36,
-          ),
-          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  dialog.chatName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: p.text1,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
+            child: InkWell(
+              onTap: () => _openPeerProfile(context),
+              borderRadius: BorderRadius.circular(8),
+              child: Row(
+                children: [
+                  AvatarWidget(
+                    name: dialog.chatName,
+                    avatarUrl: dialog.avatar,
+                    avatarColor: dialog.avatarColor,
+                    colAvaId: dialog.colAvaId,
+                    online: dialog.online,
+                    size: 36,
                   ),
-                ),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    color: subtitleColor,
-                    fontSize: 12,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          dialog.chatName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: p.text1,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          subtitle,
+                          style: TextStyle(
+                            color: subtitleColor,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           if (canCall) ...[
@@ -116,7 +134,11 @@ class ChatHeader extends StatelessWidget {
               ),
             ],
           ],
-          Icon(Icons.more_horiz, color: p.text1, size: 24),
+          IconButton(
+            tooltip: 'Профиль',
+            onPressed: () => _openPeerProfile(context),
+            icon: Icon(Icons.more_horiz, color: p.text1, size: 24),
+          ),
         ],
       ),
     );

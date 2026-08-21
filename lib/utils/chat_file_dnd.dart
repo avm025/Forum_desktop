@@ -96,57 +96,97 @@ class ChatFileDnd {
       isOwnAttachmentLocalData(localData);
 
   static Future<MediaFile?> _readOne(DataReader reader) async {
+    // 1) Сначала file URI (Desktop / Finder) — без чтения PNG в heap.
+    final fromUri = await _tryReadFileUri(reader);
+    if (fromUri != null) return fromUri;
+
+    // 2) Виртуальный файл (превью скрина в углу экрана) — сразу на диск, без bytes.
+    final fromVirtual = await _tryReadVirtualFile(reader);
+    if (fromVirtual != null) return fromVirtual;
+
+    return null;
+  }
+
+  static Future<MediaFile?> _tryReadFileUri(DataReader reader) async {
     final completer = Completer<MediaFile?>();
+    final progress = reader.getValue<Uri>(Formats.fileUri, (uri) async {
+      try {
+        if (uri == null) {
+          completer.complete(null);
+          return;
+        }
+        final path = uri.toFilePath();
+        final f = File(path);
+        if (!await f.exists()) {
+          completer.complete(null);
+          return;
+        }
+        final name = path.split(Platform.pathSeparator).last;
+        final kind = FileKind.kindFromName(name);
+        if (_isImageKind(kind) || FileKind.isVideoKind(kind)) {
+          completer.complete(MediaFile(
+            fname: name,
+            title: name,
+            kind: kind,
+            size: await f.length(),
+            URL: path,
+            width: '248',
+            height: '248',
+          ));
+          return;
+        }
+        final bytes = await f.readAsBytes();
+        completer.complete(_mediaFromBytes(name, bytes, localPath: path));
+      } catch (_) {
+        completer.complete(null);
+      }
+    }, onError: (_) {
+      if (!completer.isCompleted) completer.complete(null);
+    });
+    if (progress == null) return null;
+    return completer.future.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () => null,
+    );
+  }
 
-    void complete(MediaFile? value) {
-      if (!completer.isCompleted) completer.complete(value);
-    }
-
+  static Future<MediaFile?> _tryReadVirtualFile(DataReader reader) async {
+    final completer = Completer<MediaFile?>();
     final progress = reader.getFile(null, (file) async {
       try {
         final name = (file.fileName?.trim().isNotEmpty == true)
             ? file.fileName!.trim()
             : ((await reader.getSuggestedName())?.trim().isNotEmpty == true
                 ? (await reader.getSuggestedName())!.trim()
-                : 'file');
+                : 'screenshot.png');
+        final kind = FileKind.kindFromName(name);
+        // Скрины из thumbnail: readAll огромный — пишем temp и не кладём bytes в MediaFile.
         final bytes = await file.readAll();
         if (bytes.isEmpty) {
-          complete(null);
+          completer.complete(null);
           return;
         }
-        complete(_mediaFromBytes(name, bytes));
-      } catch (_) {
-        complete(null);
-      }
-    }, onError: (_) => complete(null));
-
-    if (progress == null) {
-      // Fallback: прямой file URI.
-      final uriProgress = reader.getValue<Uri>(Formats.fileUri, (uri) async {
-        try {
-          if (uri == null) {
-            complete(null);
-            return;
-          }
-          final path = uri.toFilePath();
-          final f = File(path);
-          if (!await f.exists()) {
-            complete(null);
-            return;
-          }
-          final bytes = await f.readAsBytes();
-          final name = path.split(Platform.pathSeparator).last;
-          complete(_mediaFromBytes(name, bytes, localPath: path));
-        } catch (_) {
-          complete(null);
+        if (_isImageKind(kind) || FileKind.isVideoKind(kind)) {
+          final path = await _writeTemp(name, bytes);
+          completer.complete(MediaFile(
+            fname: name,
+            title: name,
+            kind: kind,
+            size: bytes.length,
+            URL: path,
+            width: '248',
+            height: '248',
+          ));
+          return;
         }
-      }, onError: (_) => complete(null));
-
-      if (uriProgress == null) {
-        complete(null);
+        completer.complete(_mediaFromBytes(name, bytes));
+      } catch (_) {
+        completer.complete(null);
       }
-    }
-
+    }, onError: (_) {
+      if (!completer.isCompleted) completer.complete(null);
+    });
+    if (progress == null) return null;
     return completer.future.timeout(
       const Duration(seconds: 60),
       onTimeout: () => null,
@@ -181,6 +221,8 @@ class ChatFileDnd {
       'heic',
       'heif',
       'bmp',
+      'tif',
+      'tiff',
     }.contains(kind);
   }
 

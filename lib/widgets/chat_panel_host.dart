@@ -89,10 +89,19 @@ class _ChatPanelHostState extends State<ChatPanelHost> {
     if (dialog == null) {
       return const SizedBox.shrink();
     }
-    return ChatView(
-      key: PageStorageKey<String>('chat_panel_$id'),
-      dialog: dialog,
-      showBack: widget.showBack,
+    // Локальный Navigator: профиль собеседника открывается поверх чата
+    // (как push в iOS), не перекрывая список диалогов в wide-layout.
+    return Navigator(
+      key: ValueKey<String>('chat_nav_$id'),
+      onGenerateRoute: (_) {
+        return MaterialPageRoute<void>(
+          builder: (_) => ChatView(
+            key: PageStorageKey<String>('chat_panel_$id'),
+            dialog: dialog,
+            showBack: widget.showBack,
+          ),
+        );
+      },
     );
   }
 }

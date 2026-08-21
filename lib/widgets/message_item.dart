@@ -120,7 +120,13 @@ class _MessageItemState extends State<MessageItem> {
           _callbackFromCallMessage(context);
           return;
         }
-        MessageContextMenuController.instance.handleBubbleTap(_bubbleKey);
+        final menu = MessageContextMenuController.instance;
+        if (menu.isOpenFor(_bubbleKey)) {
+          menu.handleBubbleTap(_bubbleKey);
+          return;
+        }
+        // ЛКМ — открыть окно действий/реакций (как раньше на desktop).
+        _showActions();
       },
       onSecondaryTapUp: (details) =>
           _showActions(globalPosition: details.globalPosition),
@@ -488,13 +494,14 @@ class _MessageItemState extends State<MessageItem> {
     if (!_hasText) return const SizedBox.shrink();
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
-      child: Text(
-        _textValue,
+      child: _MessageBodyText(
+        text: _textValue,
         style: TextStyle(
           color: onAccent ? Colors.white : p.text1,
           fontSize: 15,
           height: 1.35,
         ),
+        onSimpleTap: _onTextSimpleTap,
       ),
     );
   }
@@ -508,18 +515,32 @@ class _MessageItemState extends State<MessageItem> {
         runSpacing: 2,
         crossAxisAlignment: WrapCrossAlignment.end,
         children: [
-          Text(
-            _textValue,
+          _MessageBodyText(
+            text: _textValue,
             style: TextStyle(
               color: onAccent ? Colors.white : p.text1,
               fontSize: 15,
               height: 1.35,
             ),
+            onSimpleTap: _onTextSimpleTap,
           ),
           _footerMeta(p, onAccent),
         ],
       ),
     );
+  }
+
+  void _onTextSimpleTap() {
+    if (message.isCall) {
+      _callbackFromCallMessage(context);
+      return;
+    }
+    final menu = MessageContextMenuController.instance;
+    if (menu.isOpenFor(_bubbleKey)) {
+      menu.handleBubbleTap(_bubbleKey);
+      return;
+    }
+    _showActions();
   }
 
   Widget _footer(ForumPalette p, bool onAccent, {required bool alignEnd}) {
@@ -621,6 +642,77 @@ class _Bubble extends StatelessWidget {
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
       child: IntrinsicWidth(child: bubble),
+    );
+  }
+}
+
+/// Текст сообщения: тап открывает меню действий, drag — выделение без
+/// системного toolbar/copy popup. ⌘C / Ctrl+C при выделении работают.
+class _MessageBodyText extends StatefulWidget {
+  final String text;
+  final TextStyle style;
+  final VoidCallback onSimpleTap;
+
+  const _MessageBodyText({
+    required this.text,
+    required this.style,
+    required this.onSimpleTap,
+  });
+
+  @override
+  State<_MessageBodyText> createState() => _MessageBodyTextState();
+}
+
+class _MessageBodyTextState extends State<_MessageBodyText> {
+  static const _dragSlop = 6.0;
+
+  Offset? _downGlobal;
+  bool _dragged = false;
+
+  void _onPointerDown(PointerDownEvent e) {
+    _downGlobal = e.position;
+    _dragged = false;
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    final start = _downGlobal;
+    if (start == null || _dragged) return;
+    if ((e.position - start).distance > _dragSlop) {
+      _dragged = true;
+    }
+  }
+
+  void _onPointerUp(PointerUpEvent e) {
+    final wasDrag = _dragged;
+    _downGlobal = null;
+    _dragged = false;
+    // Простой тап (без выделения) — меню как у медиа.
+    if (!wasDrag) {
+      widget.onSimpleTap();
+    }
+  }
+
+  void _onPointerCancel(PointerCancelEvent e) {
+    _downGlobal = null;
+    _dragged = false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _onPointerDown,
+      onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerUp,
+      onPointerCancel: _onPointerCancel,
+      child: SelectableText(
+        widget.text,
+        style: widget.style,
+        // Без системного окна Copy / Look Up / Share при выделении.
+        contextMenuBuilder: (context, editableTextState) =>
+            const SizedBox.shrink(),
+        magnifierConfiguration: TextMagnifierConfiguration.disabled,
+      ),
     );
   }
 }

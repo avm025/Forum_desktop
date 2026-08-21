@@ -6,7 +6,10 @@ import '../models/media_file.dart';
 import '../services/media_thumb_cache.dart';
 import '../theme/app_colors.dart';
 
-/// Превью медиа в сообщении: из дискового кэша, без повторной загрузки.
+/// Превью медиа в сообщении.
+///
+/// Локальные скрины (Shift-⌘-4) показываем через нативный [Image.file] +
+/// [cacheWidth]/[cacheHeight] — без package:image (он вешает UI на Retina PNG).
 class MediaThumbTile extends StatefulWidget {
   final MediaFile file;
   final double width;
@@ -33,7 +36,6 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
   @override
   void initState() {
     super.initState();
-    // Синхронный peek — без вспышки placeholder при первом кадре / ресайзе.
     _cachedFile = MediaThumbCache.peekSync(widget.file);
     _load();
   }
@@ -44,24 +46,34 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
     final sizeChanged = (oldWidget.width - widget.width).abs() > 0.5 ||
         (oldWidget.height - widget.height).abs() > 0.5;
     if (oldWidget.file.hash != widget.file.hash ||
-        oldWidget.file.url != widget.file.url) {
+        oldWidget.file.url != widget.file.url ||
+        oldWidget.file.URL != widget.file.URL ||
+        oldWidget.file.bytes != widget.file.bytes) {
       _cachedFile = MediaThumbCache.peekSync(widget.file);
       _error = false;
       _loading = false;
       _load();
     } else if (sizeChanged && mounted) {
-      // Только перерисовать с новыми width/height — кэш не сбрасывать.
       setState(() {});
     }
   }
 
   Future<void> _load() async {
+    // Локальный файл / маленькие bytes — рисуем сразу в build(), кэш не нужен.
+    final localPath = widget.file.URL?.trim() ?? '';
+    final hasLocal = localPath.isNotEmpty &&
+        !localPath.startsWith('http') &&
+        File(localPath).existsSync();
+    final smallBytes = widget.file.bytes != null &&
+        widget.file.bytes!.isNotEmpty &&
+        widget.file.bytes!.length < 2 * 1024 * 1024;
+    if (hasLocal || smallBytes) return;
+
     if (!MediaThumbCache.needsRemoteThumbnail(widget.file)) {
       return;
     }
 
     if (_cachedFile != null) {
-      // Уже есть из peekSync — подтянуть ensure на фоне без placeholder.
       try {
         final file = await MediaThumbCache.ensureThumbnail(widget.file);
         if (mounted && _cachedFile?.path != file.path) {
@@ -103,16 +115,46 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
     final file = widget.file;
     final w = widget.width;
     final h = widget.height;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    // Ограничиваем декод нативным движком — не больше ~512 логических px.
+    final cw = (w * dpr).round().clamp(1, 1024);
+    final ch = (h * dpr).round().clamp(1, 1024);
 
-    if (file.bytes != null && file.bytes!.isNotEmpty) {
+    // Уже сжатый JPEG после prepare / upload.
+    if (file.bytes != null &&
+        file.bytes!.isNotEmpty &&
+        file.bytes!.length < 2 * 1024 * 1024) {
       return Image.memory(
         file.bytes!,
-        key: ValueKey('bytes_${file.hash}'),
+        key: ValueKey('bytes_${file.hash}_${file.bytes!.length}'),
         width: w,
         height: h,
         fit: widget.fit,
         gaplessPlayback: true,
+        cacheWidth: cw,
+        cacheHeight: ch,
+        filterQuality: FilterQuality.low,
       );
+    }
+
+    // Локальный скрин/файл: нативный downsample, без Dart decode.
+    final localPath = file.URL?.trim() ?? '';
+    if (localPath.isNotEmpty && !localPath.startsWith('http')) {
+      final local = File(localPath);
+      if (local.existsSync()) {
+        return Image.file(
+          local,
+          key: ValueKey('local_$localPath'),
+          width: w,
+          height: h,
+          fit: widget.fit,
+          gaplessPlayback: true,
+          cacheWidth: cw,
+          cacheHeight: ch,
+          filterQuality: FilterQuality.low,
+          errorBuilder: (_, __, ___) => _placeholder(w, h, error: true),
+        );
+      }
     }
 
     if (_cachedFile != null) {
@@ -123,6 +165,9 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         height: h,
         fit: widget.fit,
         gaplessPlayback: true,
+        cacheWidth: cw,
+        cacheHeight: ch,
+        filterQuality: FilterQuality.low,
       );
     }
 
@@ -157,12 +202,17 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
           ? const SizedBox(
               width: 24,
               height: 24,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white54,
+              ),
             )
           : Icon(
               error
                   ? Icons.broken_image_outlined
-                  : (media.isVideo ? Icons.videocam_outlined : Icons.image_outlined),
+                  : (media.isVideo
+                      ? Icons.videocam_outlined
+                      : Icons.image_outlined),
               color: Colors.white54,
               size: 40,
             ),

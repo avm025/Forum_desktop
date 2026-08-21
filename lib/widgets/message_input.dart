@@ -1,12 +1,17 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
+import '../services/api_logger.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../utils/attachment_selection.dart';
+import '../utils/cursor_position.dart';
 import '../utils/emoticon_replacer.dart';
 import '../utils/file_kind.dart';
 import '../utils/media_message_layout.dart';
@@ -28,11 +33,162 @@ class _MessageInputState extends State<MessageInput> {
   String? _boundDlgId;
   int _appliedDraftEpoch = -1;
   bool _syncingText = false;
+  bool _pasteBusy = false;
 
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
+    _focusNode.onKeyEvent = _onKeyEvent;
+    CursorPosition.onClipboardImage = _onNativeClipboardImage;
+    // Пока композер в дереве — глотаем Cmd+V с картинкой (не только при focus).
+    unawaited(CursorPosition.setImagePasteIntercept(true));
+  }
+
+  void _onNativeClipboardImage(ClipboardImageFile saved) {
+    ApiLogger.instance.logEvent(
+      'PASTE',
+      'composer got native image ${saved.fileName}',
+    );
+    if (!mounted) return;
+    final caption = _controller.text;
+    _syncingText = true;
+    _controller.clear();
+    _syncingText = false;
+    if (_hasText) setState(() => _hasText = false);
+    context.read<AppState>().reportComposerText('');
+    unawaited(
+      context.read<AppState>().sendMediaMessage(
+        [
+          MediaFile(
+            fname: saved.fileName,
+            title: saved.fileName,
+            kind: 'jpeg',
+            size: saved.size,
+            URL: saved.path,
+            width: saved.width.isNotEmpty ? saved.width : '248',
+            height: saved.height.isNotEmpty ? saved.height : '248',
+          ),
+        ],
+        caption: caption,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    if (identical(CursorPosition.onClipboardImage, _onNativeClipboardImage)) {
+      CursorPosition.onClipboardImage = null;
+    }
+    unawaited(CursorPosition.setImagePasteIntercept(false));
+    _controller.removeListener(_onTextChanged);
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final isPaste = (event.logicalKey == LogicalKeyboardKey.keyV) &&
+        (HardwareKeyboard.instance.isMetaPressed ||
+            HardwareKeyboard.instance.isControlPressed);
+    if (!isPaste) return KeyEventResult.ignored;
+
+    // Перехватываем всегда: системный paste картинки в TextField на macOS
+    // подвешивает engine. Текст вставим сами, если картинки нет.
+    if (_pasteBusy) return KeyEventResult.handled;
+    unawaited(_handlePasteKey());
+    return KeyEventResult.handled;
+  }
+
+  Future<void> _handlePasteKey() async {
+    if (_pasteBusy) return;
+    _pasteBusy = true;
+    try {
+      ApiLogger.instance.logEvent('PASTE', 'cmd+v');
+      final sent = await _sendClipboardImageNative();
+      if (sent) return;
+      ApiLogger.instance.logEvent('PASTE', 'no image → text');
+      await _insertClipboardTextFallback();
+    } catch (e) {
+      ApiLogger.instance.logEvent('PASTE', 'error: $e');
+      await _insertClipboardTextFallback();
+    } finally {
+      _pasteBusy = false;
+    }
+  }
+
+  /// Native macOS: pasteboard → JPEG temp → send. Без TIFF в Dart heap.
+  Future<bool> _sendClipboardImageNative() async {
+    if (!CursorPosition.isSupported) return false;
+
+    final hasImage = await CursorPosition.hasClipboardImage();
+    ApiLogger.instance.logEvent('PASTE', 'hasClipboardImage=$hasImage');
+    if (!hasImage) return false;
+
+    // Дать UI кадр до чтения pasteboard на main (Swift).
+    await Future<void>.delayed(const Duration(milliseconds: 16));
+
+    final saved = await CursorPosition.saveClipboardImage();
+    if (saved == null) {
+      ApiLogger.instance.logEvent('PASTE', 'saveClipboardImage=null');
+      return false;
+    }
+    ApiLogger.instance.logEvent(
+      'PASTE',
+      'saved ${saved.fileName} ${saved.width}x${saved.height} '
+      '${saved.size}b path=${saved.path}',
+    );
+
+    if (!mounted) return true;
+    final caption = _controller.text;
+    _syncingText = true;
+    _controller.clear();
+    _syncingText = false;
+    setState(() => _hasText = false);
+    context.read<AppState>().reportComposerText('');
+
+    // Не await upload — UI свободен; ошибки в логе MEDIA/UPLOAD.
+    unawaited(
+      context.read<AppState>().sendMediaMessage(
+        [
+          MediaFile(
+            fname: saved.fileName,
+            title: saved.fileName,
+            kind: 'jpeg',
+            size: saved.size,
+            URL: saved.path,
+            width: saved.width.isNotEmpty ? saved.width : '248',
+            height: saved.height.isNotEmpty ? saved.height : '248',
+          ),
+        ],
+        caption: caption,
+      ),
+    );
+    return true;
+  }
+
+  Future<void> _insertClipboardTextFallback() async {
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      final text = data?.text;
+      if (text == null || text.isEmpty || !mounted) return;
+      final value = _controller.value;
+      final start = value.selection.start >= 0
+          ? value.selection.start
+          : value.text.length;
+      final end =
+          value.selection.end >= 0 ? value.selection.end : value.text.length;
+      final newText = value.text.replaceRange(start, end, text);
+      _syncingText = true;
+      _controller.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: start + text.length),
+      );
+      _syncingText = false;
+      setState(() => _hasText = newText.trim().isNotEmpty);
+      context.read<AppState>().reportComposerText(newText);
+    } catch (_) {}
   }
 
   void _onTextChanged() {
@@ -40,14 +196,6 @@ class _MessageInputState extends State<MessageInput> {
     final has = _controller.text.trim().isNotEmpty;
     if (has != _hasText) setState(() => _hasText = has);
     context.read<AppState>().reportComposerText(_controller.text);
-  }
-
-  @override
-  void dispose() {
-    _controller.removeListener(_onTextChanged);
-    _controller.dispose();
-    _focusNode.dispose();
-    super.dispose();
   }
 
   void _scheduleDialogBinding(AppState state) {
@@ -150,10 +298,11 @@ class _MessageInputState extends State<MessageInput> {
   }
 
   Future<void> _pickPhotos() async {
+    // withData: false — скрины Retina не грузим целиком в RAM на UI-isolate.
     final result = await FilePicker.platform.pickFiles(
       type: FileType.image,
       allowMultiple: true,
-      withData: true,
+      withData: false,
     );
     if (result == null || result.files.isEmpty) return;
 
@@ -294,6 +443,9 @@ class _MessageInputState extends State<MessageInput> {
                         maxLines: 5,
                         textInputAction: TextInputAction.send,
                         onSubmitted: (_) => _send(),
+                        // Не включаем contentInsertionConfiguration с image/*:
+                        // иначе Flutter тащит TIFF скрина в Dart и UI виснет.
+                        // Картинки: native NSEvent Cmd+V → JPEG temp.
                         decoration: InputDecoration(
                           isCollapsed: true,
                           hintText:

@@ -32,6 +32,7 @@ import '../models/chat_type.dart';
 import '../models/device_session.dart';
 import '../models/dialog_group.dart';
 import '../models/dialogs_list_view_model.dart';
+import '../models/dlg_info_member.dart';
 import '../models/forum_database.dart';
 import '../models/telegram_reactions.dart';
 import '../models/media_file.dart';
@@ -2421,15 +2422,35 @@ class AppState extends ChangeNotifier {
     if (!connected) return;
 
     try {
+      // Кадр UI со скелетоном до ресайза/upload.
+      await Future<void>.delayed(Duration.zero);
+
       final uploadedEntries = <Map<String, String>>[];
       final updatedFiles = <MediaFile>[];
 
       for (final file in batch) {
         final prepared = await MediaPreprocessor.prepare(
-          originalName: file.fname,
+          originalName: file.fname.isNotEmpty ? file.fname : 'screenshot.png',
           bytes: file.bytes,
           path: file.URL,
         );
+
+        // Сразу показать лёгкий JPEG в пузыре (вместо исходного Retina PNG).
+        final previewFile = MediaFile(
+          fname: prepared.fileName,
+          kind: 'jpeg',
+          size: prepared.bytes.length,
+          width: prepared.width,
+          height: prepared.height,
+          bytes: prepared.bytes,
+          URL: file.URL,
+        );
+        skeleton.files = [
+          ...updatedFiles,
+          previewFile,
+          ...batch.skip(updatedFiles.length + 1),
+        ];
+        notifyListeners();
 
         final result = await _api.uploadMediaWithDimensions(
           bytes: prepared.bytes,
@@ -2458,6 +2479,11 @@ class AppState extends ChangeNotifier {
           bytes: prepared.bytes,
           URL: file.URL,
         ));
+        skeleton.files = [
+          ...updatedFiles,
+          ...batch.skip(updatedFiles.length),
+        ];
+        notifyListeners();
       }
 
       skeleton.files = updatedFiles;
@@ -2683,6 +2709,14 @@ class AppState extends ChangeNotifier {
     required String msgId,
   }) {
     return _api.fetchMsgReadList(dlgId: dlgId, msgId: msgId);
+  }
+
+  /// Метаданные диалога / участники (`dlg_info`) для экрана профиля собеседника.
+  Future<DlgInfoResult> fetchDlgInfo(String dlgId) {
+    return _api.fetchDlgInfo(
+      dlgId: dlgId,
+      currentUserId: _profile?.id,
+    );
   }
 
   String? serverMessageId(MessageViewModel message) =>
