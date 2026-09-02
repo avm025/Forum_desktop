@@ -1,7 +1,7 @@
 name: forum_app
 description: "Forum — a Flutter messenger app (web/desktop two-pane layout)."
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -27,9 +27,9 @@ dependencies:
   firebase_core: ^4.12.1
   firebase_messaging: ^16.4.3
   qr_flutter: ^4.1.0
-  super_drag_and_drop: ^0.9.1
-  super_clipboard: ^0.9.1
-  livekit_client: ^2.5.4
+  super_drag_and_drop: ^0.10.0-dev.2
+  super_clipboard: ^0.10.0-dev.2
+  livekit_client: ^2.11.0
 
 dev_dependencies:
   flutter_test:
