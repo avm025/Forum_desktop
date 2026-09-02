@@ -64,14 +64,25 @@ jobs:
           Remove-Item $link -Force -Recurse -ErrorAction SilentlyContinue
           Copy-Item -LiteralPath $target -Destination $link -Recurse -Force
 
+      # Не вызываем `flutter build windows --release` после materialize:
+      # новый Flutter снова создаёт symlink поверх копии и падает (errno 183).
+      # CMake-сборка уже тянет flutter_assemble / Release runner.
       - name: Build Windows release
         shell: pwsh
         run: |
-          flutter build windows --release *>&1 | Tee-Object -FilePath build_windows.log
+          $cmakeDir = "build\windows\x64"
+          if (-not (Test-Path "$cmakeDir\CMakeCache.txt")) {
+            throw "CMake cache not found at $cmakeDir (config-only failed?)"
+          }
+          cmake --build $cmakeDir --config Release --parallel *>&1 |
+            Tee-Object -FilePath build_windows.log
           if ($LASTEXITCODE -ne 0) {
             Write-Host "===== LAST 120 LINES OF BUILD LOG ====="
             Get-Content build_windows.log -Tail 120
             exit $LASTEXITCODE
+          }
+          if (-not (Test-Path "$cmakeDir\runner\Release\forum_app.exe")) {
+            throw "forum_app.exe missing after cmake build"
           }
 
       - name: Upload build log (on failure)
