@@ -66,7 +66,7 @@ jobs:
 
       # Не вызываем `flutter build windows --release` после materialize:
       # новый Flutter снова создаёт symlink поверх копии и падает (errno 183).
-      # CMake-сборка уже тянет flutter_assemble / Release runner.
+      # CMake-сборка + install копируют exe/dll/data рядом (как делает flutter build).
       - name: Build Windows release
         shell: pwsh
         run: |
@@ -81,8 +81,18 @@ jobs:
             Get-Content build_windows.log -Tail 120
             exit $LASTEXITCODE
           }
-          if (-not (Test-Path "$cmakeDir\runner\Release\forum_app.exe")) {
-            throw "forum_app.exe missing after cmake build"
+          cmake --install $cmakeDir --config Release *>&1 |
+            Tee-Object -FilePath build_windows.log -Append
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "===== LAST 80 LINES OF BUILD LOG ====="
+            Get-Content build_windows.log -Tail 80
+            exit $LASTEXITCODE
+          }
+          $releaseDir = "$cmakeDir\runner\Release"
+          foreach ($must in @("forum_app.exe", "flutter_windows.dll", "data\flutter_assets")) {
+            if (-not (Test-Path "$releaseDir\$must")) {
+              throw "Missing $must in $releaseDir after cmake install"
+            }
           }
 
       - name: Upload build log (on failure)
