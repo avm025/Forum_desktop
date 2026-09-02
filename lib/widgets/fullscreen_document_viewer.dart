@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/media_file.dart';
 import '../utils/attachment_kind.dart';
 import '../utils/file_opener.dart';
+import '../utils/media_display_name.dart';
 import '../utils/media_file_loader.dart';
 import 'native_pdf_view.dart';
 
@@ -95,8 +96,7 @@ class _FullscreenDocumentViewerState extends State<FullscreenDocumentViewer> {
 
   @override
   Widget build(BuildContext context) {
-    final title =
-        widget.file.fname.isNotEmpty ? widget.file.fname : 'Документ';
+    final title = MediaDisplayName.forFile(widget.file);
 
     return Dialog(
       insetPadding: const EdgeInsets.all(16),

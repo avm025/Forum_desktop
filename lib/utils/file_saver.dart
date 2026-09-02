@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/media_file.dart';
+import 'media_display_name.dart';
 import 'media_file_loader.dart';
 import 'media_file_url.dart';
 
@@ -59,13 +60,7 @@ class FileSaver {
   }
 
   static String _fileName(MediaFile file) {
-    if (file.title.trim().isNotEmpty) {
-      return file.title.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    }
-    if (file.fname.trim().isNotEmpty) {
-      return file.fname.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    }
-    return 'document';
+    return MediaDisplayName.forSave(file);
   }
 
   /// macOS иногда возвращает путь без расширения — дописываем из имени файла.

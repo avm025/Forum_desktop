@@ -32,6 +32,23 @@ class FileKind {
     return const {'mp4', 'mov', 'avi', 'mkv', 'webm', 'ogg'}.contains(kind);
   }
 
+  static bool isImageKind(String kind) {
+    return const {
+      'jpg',
+      'jpeg',
+      'png',
+      'gif',
+      'webp',
+      'heic',
+      'heif',
+      'bmp',
+      'img',
+      'image',
+    }.contains(kind.toLowerCase());
+  }
+
+  static bool isImageName(String name) => isImageKind(kindFromName(name));
+
   static String fnameForHash(String hash, String originalName) {
     final ext = extensionFromName(originalName);
     if (ext.isEmpty) return hash;

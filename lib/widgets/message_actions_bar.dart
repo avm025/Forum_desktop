@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../models/msg_read_entry.dart';
 import '../models/telegram_reactions.dart';
 import '../theme/app_theme.dart';
+import '../utils/attachment_selection.dart';
 import '../utils/msg_read_display.dart';
 import 'avatar_widget.dart';
 
@@ -73,6 +74,7 @@ class MessageContextMenuController {
   }
 
   void close([String? result]) {
+    final wasOpen = _entry != null || _completer != null;
     _entry?.remove();
     _entry = null;
     _state = null;
@@ -80,6 +82,8 @@ class MessageContextMenuController {
     final c = _completer;
     _completer = null;
     if (c != null && !c.isCompleted) c.complete(result);
+    // Снять выделение вложений вместе с меню.
+    if (wasOpen) AttachmentSelection.clear();
   }
 
   Future<String?> show({

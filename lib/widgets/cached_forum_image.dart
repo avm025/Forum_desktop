@@ -1,6 +1,7 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../api/api_config.dart';
 import '../theme/app_colors.dart';
 
 /// Изображение с дисковым кэшем (cached_network_image).
@@ -29,6 +30,7 @@ class CachedForumImage extends StatelessWidget {
 
     Widget image = CachedNetworkImage(
       imageUrl: url,
+      httpHeaders: ApiConfig.fileHeaders,
       width: width,
       height: height,
       fit: fit,

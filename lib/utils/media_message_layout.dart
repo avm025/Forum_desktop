@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../models/media_file.dart';
 
 /// Прямоугольник плитки в альбоме медиа (порт MediaMessageCell.swift).
@@ -152,18 +154,30 @@ class MediaMessageLayout {
     }
   }
 
-  static MediaMessageLayout _layout1(MediaFile file, double width, double maxHeight) {
-    final aspect = _aspect(file);
-    final imageHeight = (width / aspect).clamp(0.0, maxHeight);
-    final previewWidth = imageHeight * aspect;
+  static MediaMessageLayout _layout1(MediaFile file, double maxWidth, double maxHeight) {
+    final aspect = _aspect(file).clamp(0.2, 5.0);
+    final iw = file.widthValue;
+    final ih = file.heightValue;
+
+    double previewWidth;
+    if (iw > 0 && ih > 0) {
+      final scale = math.min(maxWidth / iw, maxHeight / ih);
+      previewWidth = (iw * math.min(scale, 1.0)).clamp(48.0, maxWidth);
+      if (scale < 1.0) previewWidth = (iw * scale).clamp(48.0, maxWidth);
+    } else {
+      previewWidth = math.min(280.0, maxWidth);
+    }
+
+    final imageHeight = (previewWidth / aspect).clamp(48.0, maxHeight);
+    final w = math.min(previewWidth, imageHeight * aspect);
     return MediaMessageLayout(
-      totalWidth: previewWidth,
+      totalWidth: w,
       totalHeight: imageHeight,
       tiles: [
         MediaTileRect(
           left: 0,
           top: 0,
-          width: previewWidth,
+          width: w,
           height: imageHeight,
           playIconSize: 60,
         ),

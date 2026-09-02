@@ -4,6 +4,7 @@ import '../api/client_msg_hash.dart';
 import '../api/msg_list_cursors.dart';
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
+import '../utils/media_display_name.dart';
 
 /// Формирование WS `msg` для пересылки (repost) без повторного upload.
 class ForwardMapper {
@@ -175,9 +176,11 @@ class ForwardMapper {
   }
 
   static Map<String, dynamic> _fileBody(MessageViewModel source) {
-    final title = (source.fileTitle ?? '').trim().isNotEmpty
-        ? source.fileTitle!.trim()
-        : (source.files.isNotEmpty ? source.files.first.fname : 'Файл');
+    final title = MediaDisplayName.resolve(
+      title: source.fileTitle,
+      fname: source.files.isNotEmpty ? source.files.first.fname : null,
+      dttmcr: source.dttmcr,
+    );
     return {
       'desc': source.desc.trim(),
       'title': title,
@@ -185,7 +188,7 @@ class ForwardMapper {
           .map(
             (f) => {
               'kind': f.kind,
-              'title': f.title.isNotEmpty ? f.title : f.fname,
+              'title': MediaDisplayName.forFile(f, dttmcr: source.dttmcr),
               'size': f.size.toString(),
               'fname': f.fname,
               'fdir': f.fdir,

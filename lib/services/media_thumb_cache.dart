@@ -3,8 +3,11 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+import '../api/api_config.dart';
 import '../models/media_file.dart';
+import '../utils/file_kind.dart';
 import '../utils/media_file_loader.dart';
+import '../utils/media_file_url.dart';
 import '../utils/video_converter.dart';
 
 /// Дисковый кэш превью медиа в сообщениях (фото + первый кадр видео).
@@ -64,6 +67,7 @@ class MediaThumbCache {
     final f = File('$base/$key.jpg');
     try {
       if (f.existsSync() && f.lengthSync() > 0) {
+        // sync peek — без async validate; build перезагрузит при ошибке decode
         _knownPaths[key] = f.path;
         return f;
       }
@@ -74,8 +78,13 @@ class MediaThumbCache {
   static Future<File?> getIfExists(MediaFile file) async {
     final f = await _cacheFile(file);
     if (await f.exists() && await f.length() > 0) {
-      _remember(f, file);
-      return f;
+      if (await _isValidImageFile(f)) {
+        _remember(f, file);
+        return f;
+      }
+      try {
+        await f.delete();
+      } catch (_) {}
     }
     return null;
   }
@@ -99,21 +108,85 @@ class MediaThumbCache {
   }
 
   static Future<File> _ensureImpl(MediaFile file) async {
-    final out = await _cacheFile(file);
-    if (await out.exists() && await out.length() > 0) {
-      _remember(out, file);
-      return out;
+    if (!_canGenerateThumbnail(file)) {
+      throw StateError('Нет превью для ${file.fname}');
     }
 
-    if (file.isVideo) {
+    final out = await _cacheFile(file);
+    if (await out.exists() && await out.length() > 0) {
+      if (await _isValidImageFile(out)) {
+        _remember(out, file);
+        return out;
+      }
+      try {
+        await out.delete();
+      } catch (_) {}
+    }
+
+    if (file.isVideo || FileKind.isVideoKind(file.kind)) {
       await _ensureVideoThumbnail(file, out);
       _remember(out, file);
       return out;
     }
 
     await _downloadPhotoThumbnail(file, out);
+    if (!await _isValidImageFile(out)) {
+      try {
+        await out.delete();
+      } catch (_) {}
+      throw StateError('Ответ не является изображением');
+    }
     _remember(out, file);
     return out;
+  }
+
+  static bool _canGenerateThumbnail(MediaFile file) {
+    if (file.isVideo || FileKind.isVideoKind(file.kind)) return true;
+    final name = file.fname.isNotEmpty ? file.fname : file.title;
+    return FileKind.isImageKind(file.kind) || FileKind.isImageName(name);
+  }
+
+  static Future<bool> _isValidImageFile(File file) async {
+    try {
+      final raf = await file.open();
+      final header = await raf.read(12);
+      await raf.close();
+      if (header.length < 3) return false;
+      // JPEG
+      if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) {
+        return true;
+      }
+      // PNG
+      if (header.length >= 8 &&
+          header[0] == 0x89 &&
+          header[1] == 0x50 &&
+          header[2] == 0x4E &&
+          header[3] == 0x47) {
+        return true;
+      }
+      // GIF
+      if (header.length >= 3 &&
+          header[0] == 0x47 &&
+          header[1] == 0x49 &&
+          header[2] == 0x46) {
+        return true;
+      }
+      // WEBP
+      if (header.length >= 12 &&
+          header[0] == 0x52 &&
+          header[1] == 0x49 &&
+          header[2] == 0x46 &&
+          header[3] == 0x46 &&
+          header[8] == 0x57 &&
+          header[9] == 0x45 &&
+          header[10] == 0x42 &&
+          header[11] == 0x50) {
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Future<void> _downloadPhotoThumbnail(MediaFile file, File out) async {
@@ -123,7 +196,10 @@ class MediaThumbCache {
     }
 
     final response = await http
-        .get(Uri.parse(url))
+        .get(
+          Uri.parse(url),
+          headers: ApiConfig.fileHeaders,
+        )
         .timeout(const Duration(seconds: 60));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('HTTP ${response.statusCode}');
@@ -132,9 +208,9 @@ class MediaThumbCache {
   }
 
   static String _photoSourceUrl(MediaFile file) {
-    if (file.preview.startsWith('http')) return file.preview;
-    if (file.url.startsWith('http')) return file.url;
-    return '';
+    final preview = file.preview.trim();
+    if (preview.startsWith('http')) return preview;
+    return MediaFileUrl.resolve(file);
   }
 
   static Future<void> _ensureVideoThumbnail(MediaFile file, File out) async {
@@ -175,6 +251,7 @@ class MediaThumbCache {
   }
 
   static bool needsRemoteThumbnail(MediaFile file) {
+    if (!_canGenerateThumbnail(file)) return false;
     if (file.bytes != null && file.bytes!.isNotEmpty) return false;
     if (file.URL != null && file.URL!.isNotEmpty) return false;
     return file.url.isNotEmpty || file.preview.startsWith('http');

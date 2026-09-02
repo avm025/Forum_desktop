@@ -3,11 +3,13 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../api/api_config.dart';
 import '../models/media_file.dart';
 import '../services/media_thumb_cache.dart';
 import '../theme/app_theme.dart';
 import '../utils/file_kind.dart';
 import '../utils/file_opener.dart';
+import '../utils/media_display_name.dart';
 import '../utils/media_file_loader.dart';
 import '../utils/media_file_url.dart';
 
@@ -51,11 +53,7 @@ class _FileRowTileState extends State<FileRowTile> {
       _localPath != null ||
       (file.bytes != null && file.bytes!.isNotEmpty);
 
-  String get _title {
-    if (file.title.isNotEmpty) return file.title;
-    if (file.fname.isNotEmpty) return file.fname;
-    return 'Документ';
-  }
+  String get _title => MediaDisplayName.forFile(file);
 
   String get _sizeLabel => file.humanSize;
 
@@ -152,7 +150,10 @@ class _FileRowTileState extends State<FileRowTile> {
     if (previewUrl.startsWith('http://') || previewUrl.startsWith('https://')) {
       if (mounted) {
         setState(
-          () => _preview = CachedNetworkImageProvider(previewUrl),
+          () => _preview = CachedNetworkImageProvider(
+            previewUrl,
+            headers: ApiConfig.fileHeaders,
+          ),
         );
       }
       return;
@@ -255,6 +256,13 @@ class _FileRowTileState extends State<FileRowTile> {
     final metaColor = onAccent ? Colors.white70 : p.text2;
     final actionColor = onAccent ? p.lime : p.purple;
 
+    final textMaxWidth = widget.maxWidth != null
+        ? (widget.maxWidth! -
+            FileRowTile._iconSize -
+            FileRowTile._gapBeforeText -
+            8)
+        : 260.0;
+
     return Material(
       color: Colors.transparent,
       child: ConstrainedBox(
@@ -266,37 +274,48 @@ class _FileRowTileState extends State<FileRowTile> {
           decoration: BoxDecoration(
             color: widget.selected
                 ? (onAccent
-                    ? Colors.white.withValues(alpha: 0.18)
-                    : const Color(0x332E7CF6))
+                    ? Colors.white.withValues(alpha: 0.12)
+                    : const Color(0x1A2E7CF6))
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
-            border: widget.selected
-                ? Border.all(color: const Color(0xFF2E7CF6), width: 1.5)
-                : null,
           ),
           padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
           child: InkWell(
             onTap: widget.onTap,
             borderRadius: BorderRadius.circular(8),
             child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 GestureDetector(
                   onTap: _onLeadingTap,
-                  child: _LeadingIcon(
-                    size: FileRowTile._iconSize,
-                    radius: FileRowTile._iconRadius,
-                    background: iconBg,
-                    onAccent: onAccent,
-                    purple: p.purple,
-                    checking: _checking,
-                    busy: _busy,
-                    downloaded: _downloaded,
-                    preview: _preview,
-                    ext: _extLabel,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      _LeadingIcon(
+                        size: FileRowTile._iconSize,
+                        radius: FileRowTile._iconRadius,
+                        background: iconBg,
+                        onAccent: onAccent,
+                        purple: p.purple,
+                        checking: _checking,
+                        busy: _busy,
+                        downloaded: _downloaded,
+                        preview: _preview,
+                        ext: _extLabel,
+                      ),
+                      if (widget.selected)
+                        const Positioned(
+                          top: -2,
+                          right: -2,
+                          child: _TelegramCheckBadge(),
+                        ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: FileRowTile._gapBeforeText),
-                Expanded(
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: textMaxWidth),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
@@ -314,6 +333,7 @@ class _FileRowTileState extends State<FileRowTile> {
                       ),
                       const SizedBox(height: 2),
                       Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
                           if (_sizeLabel.isNotEmpty || _extLabel.isNotEmpty)
                             Flexible(
@@ -541,6 +561,36 @@ class _ExtPreview extends StatelessWidget {
             height: 1,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Кружок с галкой — как выделение в Telegram.
+class _TelegramCheckBadge extends StatelessWidget {
+  const _TelegramCheckBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 20,
+      height: 20,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: const Color(0xFF2E7CF6),
+        border: Border.all(color: Colors.white, width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 3,
+            offset: const Offset(0, 1),
+          ),
+        ],
+      ),
+      child: const Icon(
+        Icons.check_rounded,
+        size: 13,
+        color: Colors.white,
       ),
     );
   }

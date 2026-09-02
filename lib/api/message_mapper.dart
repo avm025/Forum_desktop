@@ -8,6 +8,7 @@ import '../models/media_file.dart';
 import '../models/message_emoji_model.dart';
 import '../api/likes_mapper.dart';
 import '../models/message_view_model.dart';
+import '../utils/media_display_name.dart';
 /// Преобразование сообщений с сервера (msg_list / msg) → [MessageViewModel].
 class MessageMapper {
   MessageMapper._();
@@ -68,6 +69,8 @@ class MessageMapper {
     String? address;
     MsgSize size = MsgSize.zero;
 
+    final dttmcr = json['dttmcr']?.toString() ?? '';
+
     switch (serverType) {
       case 'txt':
         body = bodyRaw;
@@ -78,9 +81,13 @@ class MessageMapper {
         desc = bodyJson?['desc']?.toString() ?? '';
         body = desc;
         text = desc;
-        files = _parseFiles(bodyJson?['files'] ?? json['files']);
+        files = _parseFiles(
+          bodyJson?['files'] ?? json['files'],
+          dttmcr: dttmcr,
+        );
         if (files.isNotEmpty) {
           size = MsgSize(files.first.widthValue, files.first.heightValue);
+          fileTitle = files.first.title;
         }
       case 'file':
         // Подпись — только desc; сырой body JSON в чат не показываем
@@ -88,20 +95,18 @@ class MessageMapper {
         desc = bodyJson?['desc']?.toString() ?? '';
         body = desc;
         text = desc;
-        files = _parseFiles(bodyJson?['files']);
+        files = _parseFiles(bodyJson?['files'], dttmcr: dttmcr);
         if (files.isEmpty && bodyJson != null) {
-          files = [_fileFromMap(bodyJson)];
+          files = [_fileFromMap(bodyJson, dttmcr: dttmcr)];
         }
         if (files.isNotEmpty) {
-          fileTitle = files.first.fname.isNotEmpty
-              ? (bodyJson?['title']?.toString() ?? files.first.fname)
-              : bodyJson?['title']?.toString();
+          fileTitle = files.first.title;
           fileSize = files.first.humanSize;
           fileFormat = files.first.formatLabel;
         }
       case 'voice':
         final voiceBody = bodyJson ?? json;
-        files = [_fileFromMap(voiceBody)];
+        files = [_fileFromMap(voiceBody, dttmcr: dttmcr)];
         voiceHistogram = _parseHistogram(
           voiceBody['hist'] ?? voiceBody['voice_histogram'] ?? json['voice_histogram'],
         );
@@ -141,7 +146,7 @@ class MessageMapper {
       // Для call в prn_body хранится сырой JSON исходного сообщения.
       resolvedPrnBody = prnBody;
     } else if (prnBodyJson != null) {
-      final prnFiles = _parseFiles(prnBodyJson['files']);
+      final prnFiles = _parseFiles(prnBodyJson['files'], dttmcr: dttmcr);
       if (prnFiles.isNotEmpty) prnFirstFile = prnFiles.first;
       resolvedPrnBody = prnBodyJson['desc']?.toString() ??
           prnBodyJson['body']?.toString() ??
@@ -157,7 +162,7 @@ class MessageMapper {
       text: text,
       fr_name: json['fr_name']?.toString() ?? '',
       fr_id: frId.isEmpty ? null : frId,
-      dttmcr: json['dttmcr']?.toString() ?? '',
+      dttmcr: dttmcr,
       dttmup: json['dttmup']?.toString() ?? '',
       dttmrd: json['dttmrd']?.toString() ?? '',
       dtshow: _formatTime(json['dttmcr']?.toString() ?? ''),
@@ -171,9 +176,14 @@ class MessageMapper {
       prn_fr_id: json['prn_fr_id']?.toString() ?? '',
       prn_fr_name: json['prn_fr_name']?.toString() ?? '',
       prn_type: prnType,
-      prn_fileTitle: prnType.toLowerCase() == 'call'
-          ? ''
-          : (prnBodyJson?['title']?.toString() ?? ''),
+      prn_fileTitle: () {
+        if (prnType.toLowerCase() == 'call') return '';
+        if (prnFirstFile != null) return prnFirstFile.title;
+        final t = prnBodyJson?['title']?.toString() ?? '';
+        final f = prnBodyJson?['fname']?.toString() ?? '';
+        if (t.isEmpty && f.isEmpty) return '';
+        return MediaDisplayName.resolve(title: t, fname: f, dttmcr: dttmcr);
+      }(),
       prn_firstFile: prnFirstFile,
       repost: _parseRepost(json['repost']),
       fileTitle: fileTitle,
@@ -197,8 +207,14 @@ class MessageMapper {
   /// Обновить существующее сообщение данными с сервера (push msg / эхо).
   static void updateFromServer(MessageViewModel target, MessageViewModel incoming) {
     if (incoming.id.isNotEmpty) target.id = incoming.id;
-    target.body = incoming.body;
-    target.text = incoming.text;
+    final incomingBody = incoming.body.trim();
+    final incomingText = incoming.text.trim();
+    if (incomingBody.isNotEmpty || target.body.trim().isEmpty) {
+      target.body = incoming.body;
+    }
+    if (incomingText.isNotEmpty || target.text.trim().isEmpty) {
+      target.text = incoming.text;
+    }
     target.dttmcr = incoming.dttmcr;
     target.dttmup = incoming.dttmup;
     target.dttmrd = incoming.dttmrd;
@@ -273,17 +289,25 @@ class MessageMapper {
     }
   }
 
-  static List<MediaFile> _parseFiles(dynamic raw) {
+  static List<MediaFile> _parseFiles(dynamic raw, {String? dttmcr}) {
     if (raw is! List) return const [];
-    return raw.whereType<Map>().map(_fileFromMap).toList();
+    return raw
+        .whereType<Map>()
+        .map((e) => _fileFromMap(e, dttmcr: dttmcr))
+        .toList();
   }
 
-  static MediaFile _fileFromMap(Map<dynamic, dynamic> map) {
+  static MediaFile _fileFromMap(Map<dynamic, dynamic> map, {String? dttmcr}) {
     final m = Map<String, dynamic>.from(map);
     final fdir = m['fdir']?.toString() ?? '';
     final fname = m['fname']?.toString() ?? '';
     final title = m['title']?.toString() ?? '';
     final name = fname.isNotEmpty ? fname : title;
+    final display = MediaDisplayName.resolve(
+      title: title,
+      fname: name,
+      dttmcr: dttmcr,
+    );
     return MediaFile(
       hash: m['hash']?.toString() ?? '',
       url: m['url']?.toString().isNotEmpty == true
@@ -293,7 +317,7 @@ class MessageMapper {
       fdir: fdir,
       kind: m['kind']?.toString() ?? m['type']?.toString() ?? '',
       preview: ApiConfig.mediaUrl(m['preview']?.toString()),
-      title: title,
+      title: display,
       size: _parseInt(m['size']),
       width: m['width']?.toString() ?? '0',
       height: m['height']?.toString() ?? '0',

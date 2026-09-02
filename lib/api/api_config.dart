@@ -60,6 +60,12 @@ class ApiConfig {
         'Key': apiKey,
       };
 
+  /// Загрузка файлов/превью с `fileServer` (Bearer + Key).
+  static Map<String, String> get fileHeaders => {
+        if (hasSession) 'Authorization': 'Bearer $token',
+        'Key': apiKey,
+      };
+
   /// URL аватара/медиа по относительному пути с основного сервера.
   static String mediaUrl(String? path) {
     if (path == null || path.isEmpty) return '';

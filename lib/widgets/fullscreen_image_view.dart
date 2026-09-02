@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../models/media_file.dart';
+import '../utils/media_file_url.dart';
 import 'cached_forum_image.dart';
 
 /// Полноэкранный просмотр фото из чата.
@@ -21,14 +24,27 @@ class FullscreenImageViewer extends StatelessWidget {
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final hasBytes = file.bytes != null && file.bytes!.isNotEmpty;
-    final hasUrl = file.url.isNotEmpty;
+    final preview = file.preview.trim();
+    final resolved = MediaFileUrl.resolve(file);
+    final localPath = file.URL?.trim() ?? '';
 
     Widget image;
     if (hasBytes) {
       image = Image.memory(file.bytes!, fit: BoxFit.contain);
-    } else if (hasUrl) {
+    } else if (localPath.isNotEmpty &&
+        !localPath.startsWith('http') &&
+        File(localPath).existsSync()) {
+      image = Image.file(File(localPath), fit: BoxFit.contain);
+    } else if (preview.startsWith('http://') || preview.startsWith('https://')) {
       image = CachedForumImage(
-        url: file.url,
+        url: preview,
+        width: size.width - 32,
+        height: size.height - 80,
+        fit: BoxFit.contain,
+      );
+    } else if (resolved.isNotEmpty) {
+      image = CachedForumImage(
+        url: resolved,
         width: size.width - 32,
         height: size.height - 80,
         fit: BoxFit.contain,

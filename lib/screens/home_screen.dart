@@ -8,6 +8,7 @@ import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../widgets/chat_panel_host.dart';
+import '../widgets/chat_pane_background.dart';
 import '../widgets/dialogs_sidebar.dart';
 import '../models/dialogs_list_view_model.dart';
 
@@ -37,26 +38,16 @@ class HomeScreen extends StatelessWidget {
   }
 
   Widget _buildBody(BuildContext context, AppState state, ForumPalette p) {
-    return IndexedStack(
-      index: _navTabIndex(state.navTab),
-      sizing: StackFit.expand,
-      children: [
-        _buildChatsPane(context, state, p),
-        _PlaceholderTab(palette: p, title: 'Проекты'),
-        _PlaceholderTab(palette: p, title: 'Задачи'),
-        const ApiLogScreen(),
-        const ProfileScreen(),
-      ],
-    );
+    // Без IndexedStack вкладок: неактивные вкладки с OverlayPortal
+    // (поля ввода/скролл) при активации ломают layout.
+    return switch (state.navTab) {
+      BottomNavTab.chats => _buildChatsPane(context, state, p),
+      BottomNavTab.projects => _PlaceholderTab(palette: p, title: 'Проекты'),
+      BottomNavTab.tasks => _PlaceholderTab(palette: p, title: 'Задачи'),
+      BottomNavTab.newLog => const ApiLogScreen(),
+      BottomNavTab.profile => const ProfileScreen(),
+    };
   }
-
-  static int _navTabIndex(BottomNavTab tab) => switch (tab) {
-        BottomNavTab.chats => 0,
-        BottomNavTab.projects => 1,
-        BottomNavTab.tasks => 2,
-        BottomNavTab.newLog => 3,
-        BottomNavTab.profile => 4,
-      };
 
   Widget _buildChatsPane(
     BuildContext context,
@@ -64,27 +55,25 @@ class HomeScreen extends StatelessWidget {
     ForumPalette p,
   ) {
     final selected = state.selectedDialog;
+    // MediaQuery вместо LayoutBuilder: иначе при смене чата OverlayPortal
+    // (Scrollbar/Navigator) активируется внутри performLayout → краш.
+    final wide =
+        MediaQuery.sizeOf(context).width >= _twoPaneBreakpoint;
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final wide = constraints.maxWidth >= _twoPaneBreakpoint;
+    if (wide) {
+      return _ResizableChatsSplit(
+        totalWidth: MediaQuery.sizeOf(context).width,
+        selected: selected,
+        dialogs: state.dialogs,
+        emptyChild: const _NoChatSelected(),
+      );
+    }
 
-        if (wide) {
-          return _ResizableChatsSplit(
-            totalWidth: constraints.maxWidth,
-            selected: selected,
-            dialogs: state.dialogs,
-            emptyChild: _NoChatSelected(palette: p),
-          );
-        }
-
-        return ChatPanelHost(
-          selected: selected,
-          dialogs: state.dialogs,
-          showBack: selected != null,
-          emptyChild: const DialogsSidebar(),
-        );
-      },
+    return ChatPanelHost(
+      selected: selected,
+      dialogs: state.dialogs,
+      showBack: selected != null,
+      emptyChild: const DialogsSidebar(),
     );
   }
 }
@@ -221,24 +210,36 @@ class _ResizableChatsSplitState extends State<_ResizableChatsSplit> {
 }
 
 class _NoChatSelected extends StatelessWidget {
-  final ForumPalette palette;
-  const _NoChatSelected({required this.palette});
+  const _NoChatSelected();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: palette.bg1,
-      alignment: Alignment.center,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.chat_bubble_outline, size: 56, color: palette.text3),
-          const SizedBox(height: 12),
-          Text(
-            'Выберите чат, чтобы начать переписку',
-            style: TextStyle(color: palette.text2, fontSize: 15),
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // Как в Telegram Desktop: полупрозрачная «таблетка» по центру обоев.
+    final bubbleColor = isDark
+        ? const Color(0x591C1C1C) // ~35%
+        : const Color(0x59000000);
+    return ChatPaneBackground(
+      child: Center(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: bubbleColor,
+            borderRadius: BorderRadius.circular(20),
           ),
-        ],
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+            child: Text(
+              'Выберите, кому хотели бы написать',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                height: 1.25,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../models/media_file.dart';
 import '../utils/attachment_selection.dart';
@@ -11,12 +10,17 @@ import '../utils/media_message_layout.dart';
 import 'draggable_attachment_group.dart';
 import 'file_row_tile.dart';
 
-/// Список документов в пузыре: выделение рамкой / кликом и DnD одного или группы.
+/// Список документов в пузыре.
+///
+/// Один файл: ЛКМ — открыть (если загружен), ПКМ — меню.
+/// Группа: ЛКМ — выделить/снять, двойной ЛКМ — открыть, ПКМ — меню.
 class DocumentAttachmentList extends StatefulWidget {
   final List<MediaFile> files;
   final bool onAccent;
   final double maxWidth;
   final void Function(MediaFile file) onOpen;
+  final void Function(List<MediaFile> selected)? onSelectionChanged;
+  final void Function(Offset globalPosition)? onContextMenu;
   final Widget? footer;
 
   const DocumentAttachmentList({
@@ -25,6 +29,8 @@ class DocumentAttachmentList extends StatefulWidget {
     required this.onAccent,
     required this.maxWidth,
     required this.onOpen,
+    this.onSelectionChanged,
+    this.onContextMenu,
     this.footer,
   });
 
@@ -46,6 +52,10 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
   bool _marqueeActive = false;
   int? _tapIndex;
   DateTime? _lastTapAt;
+  Timer? _deselectTimer;
+  String? _pendingDeselectId;
+
+  static const _doubleTapWindow = Duration(milliseconds: 200);
 
   @override
   void initState() {
@@ -57,6 +67,7 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
 
   @override
   void dispose() {
+    _deselectTimer?.cancel();
     AttachmentSelection.clearToken.removeListener(_onGlobalClear);
     AttachmentSelection.activeOwner.removeListener(_onOwnerChanged);
     if (identical(AttachmentSelection.activeOwner.value, _owner)) {
@@ -65,23 +76,49 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
     super.dispose();
   }
 
+  void _cancelPendingDeselect() {
+    _deselectTimer?.cancel();
+    _deselectTimer = null;
+    _pendingDeselectId = null;
+  }
+
+  void _scheduleDeselect(String id) {
+    _cancelPendingDeselect();
+    _pendingDeselectId = id;
+    _deselectTimer = Timer(_doubleTapWindow, () {
+      if (!mounted || _pendingDeselectId != id) return;
+      _pendingDeselectId = null;
+      _deselectTimer = null;
+      final next = Set<String>.from(_selected)..remove(id);
+      if (next.isEmpty) {
+        _clearLocal();
+      } else {
+        _applySelection(next);
+      }
+    });
+  }
+
   void _onGlobalClear() {
     if (!mounted || _selected.isEmpty) return;
     setState(() => _selected.clear());
+    widget.onSelectionChanged?.call(const []);
   }
 
   void _onOwnerChanged() {
     if (!mounted || _selected.isEmpty) return;
     if (identical(AttachmentSelection.activeOwner.value, _owner)) return;
     setState(() => _selected.clear());
+    widget.onSelectionChanged?.call(const []);
   }
 
   void _clearLocal() {
+    _cancelPendingDeselect();
     if (_selected.isEmpty) return;
     setState(() => _selected.clear());
     if (identical(AttachmentSelection.activeOwner.value, _owner)) {
       AttachmentSelection.activeOwner.value = null;
     }
+    widget.onSelectionChanged?.call(const []);
   }
 
   void _applySelection(Set<String> next) {
@@ -91,6 +128,15 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
         ..clear()
         ..addAll(next);
     });
+    widget.onSelectionChanged?.call(_selectedFiles());
+  }
+
+  List<MediaFile> _selectedFiles() {
+    final out = <MediaFile>[];
+    for (var i = 0; i < _list.length; i++) {
+      if (_selected.contains(_idAt(i))) out.add(_list[i]);
+    }
+    return out;
   }
 
   List<MediaFile> get _list =>
@@ -163,17 +209,16 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
   void _onPointerMove(PointerMoveEvent e) {
     if (e.buttons != kPrimaryButton) return;
     if (_marqueeOrigin == null) return;
-
-    final wantMarquee = HardwareKeyboard.instance.isShiftPressed || _marqueeActive;
-    if (!wantMarquee) return;
+    if (_list.length <= 1) return;
 
     final local = _toLocal(e.position);
-    if ((local - _marqueeOrigin!).distance < 4) return;
+    if (!_marqueeActive && (local - _marqueeOrigin!).distance < 10) return;
 
     setState(() {
       _marqueeActive = true;
       _marqueeCurrent = local;
     });
+    _cancelPendingDeselect();
     _selectIntersecting();
   }
 
@@ -182,6 +227,7 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
     final wasMarquee = _marqueeActive;
 
     if (wasMarquee) {
+      AttachmentSelection.suppressNextBubbleTap();
       setState(() {
         _marqueeActive = false;
         _marqueeOrigin = null;
@@ -201,31 +247,44 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
     }
 
     final id = _idAt(hit);
+    final isGroup = _list.length > 1;
     final now = DateTime.now();
     final doubleTap = _tapIndex == hit &&
         _lastTapAt != null &&
-        now.difference(_lastTapAt!) < const Duration(milliseconds: 350);
+        now.difference(_lastTapAt!) < _doubleTapWindow;
 
     _tapIndex = hit;
     _lastTapAt = now;
 
-    if (doubleTap) {
+    AttachmentSelection.suppressNextBubbleTap();
+
+    // Один файл — ЛКМ открывает.
+    if (!isGroup) {
       unawaited(_openIfDownloaded(_list[hit]));
       return;
     }
 
-    // Клик переключает файл в мультивыборе (без модификаторов).
-    final next = Set<String>.from(_selected);
-    if (next.contains(id)) {
-      next.remove(id);
-    } else {
-      next.add(id);
+    // Группа: двойной ЛКМ — открыть, выделение визуально не трогаем.
+    if (doubleTap) {
+      _cancelPendingDeselect();
+      unawaited(_openIfDownloaded(_list[hit]));
+      return;
     }
-    if (next.isEmpty) {
-      _clearLocal();
-    } else {
-      _applySelection(next);
+
+    // Группа: ЛКМ — выделить сразу; снять — с задержкой (ждём возможный dblclick).
+    if (_selected.contains(id)) {
+      _scheduleDeselect(id);
+      return;
     }
+    _cancelPendingDeselect();
+    _applySelection({..._selected, id});
+  }
+
+  void _onSecondaryTapUp(TapUpDetails details) {
+    AttachmentSelection.retainPointer();
+    AttachmentSelection.suppressNextBubbleTap();
+    // ПКМ только открывает меню — выделение не меняем.
+    widget.onContextMenu?.call(details.globalPosition);
   }
 
   void _onPointerCancel() {
@@ -257,9 +316,15 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
       selectedIds: Set<String>.from(_selected),
       nameOnlyDragPreview: true,
       canStartDrag: (id) {
-        if (_marqueeActive || HardwareKeyboard.instance.isShiftPressed) {
+        if (_marqueeActive) return false;
+        if (list.length <= 1) {
+          for (var i = 0; i < list.length; i++) {
+            if (_idAt(i) != id) continue;
+            return MediaFileLoader.hasLocalCopySync(list[i]);
+          }
           return false;
         }
+        if (!_selected.contains(id)) return false;
         for (var i = 0; i < list.length; i++) {
           if (_idAt(i) != id) continue;
           return MediaFileLoader.hasLocalCopySync(list[i]);
@@ -267,61 +332,64 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
         return false;
       },
       builder: (context, wrapFile) {
-        return Listener(
-          onPointerDown: _onPointerDown,
-          onPointerMove: _onPointerMove,
-          onPointerUp: _onPointerUp,
-          onPointerCancel: (_) => _onPointerCancel(),
-          child: Stack(
-            key: _listKey,
-            clipBehavior: Clip.none,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (var i = 0; i < list.length; i++) ...[
-                    if (i > 0)
-                      const SizedBox(height: DocumentAttachmentList._rowGap),
-                    KeyedSubtree(
-                      key: _rowKeys[i],
-                      child: wrapFile(
-                        list[i],
-                        FileRowTile(
-                          file: list[i],
-                          onAccent: widget.onAccent,
-                          maxWidth: widget.maxWidth,
-                          selected: _selected.contains(_idAt(i)),
-                          onTap: () {
-                            // Клик обрабатывает Listener (выделение / dblclick).
-                          },
+        return GestureDetector(
+          onSecondaryTapUp: _onSecondaryTapUp,
+          child: Listener(
+            onPointerDown: _onPointerDown,
+            onPointerMove: _onPointerMove,
+            onPointerUp: _onPointerUp,
+            onPointerCancel: (_) => _onPointerCancel(),
+            child: Stack(
+              key: _listKey,
+              clipBehavior: Clip.none,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < list.length; i++) ...[
+                      if (i > 0)
+                        const SizedBox(height: DocumentAttachmentList._rowGap),
+                      KeyedSubtree(
+                        key: _rowKeys[i],
+                        child: wrapFile(
+                          list[i],
+                          FileRowTile(
+                            file: list[i],
+                            onAccent: widget.onAccent,
+                            maxWidth: widget.maxWidth,
+                            selected: _selected.contains(_idAt(i)),
+                            onTap: () {
+                              // Клик обрабатывает Listener (выделение / открытие).
+                            },
+                          ),
                         ),
                       ),
-                    ),
+                    ],
+                    if (widget.footer != null)
+                      Padding(
+                        padding: EdgeInsets.only(top: list.isNotEmpty ? 6 : 0),
+                        child: widget.footer!,
+                      ),
                   ],
-                  if (widget.footer != null)
-                    Padding(
-                      padding: EdgeInsets.only(top: list.isNotEmpty ? 6 : 0),
-                      child: widget.footer!,
-                    ),
-                ],
-              ),
-              if (_marqueeActive && _marqueeRect != null)
-                Positioned.fromRect(
-                  rect: _marqueeRect!,
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: const Color(0x332E7CF6),
-                        border: Border.all(
-                          color: const Color(0xFF2E7CF6),
-                          width: 1,
+                ),
+                if (_marqueeActive && _marqueeRect != null)
+                  Positioned.fromRect(
+                    rect: _marqueeRect!,
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: const Color(0x332E7CF6),
+                          border: Border.all(
+                            color: const Color(0xFF2E7CF6),
+                            width: 1,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         );
       },

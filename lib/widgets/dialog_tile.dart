@@ -11,6 +11,8 @@ class DialogTile extends StatelessWidget {
   final bool selected;
   final bool dropHover;
   final VoidCallback onTap;
+  final bool selectMode;
+  final bool checked;
 
   const DialogTile({
     super.key,
@@ -18,94 +20,110 @@ class DialogTile extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.dropHover = false,
+    this.selectMode = false,
+    this.checked = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final emphasized = selected || dropHover;
+    final emphasized = !selectMode && (selected || dropHover);
     final titleColor = emphasized ? Colors.white : p.text1;
     final subColor = emphasized ? Colors.white70 : p.text2;
     final timeColor = emphasized ? Colors.white70 : p.text2;
 
     final isOutgoing = dialog.last_msg_status >= 0;
-    final bg = dropHover
-        ? p.purple.withValues(alpha: 0.85)
-        : (selected ? p.selectedTile : Colors.transparent);
+    final bg = selectMode
+        ? Colors.transparent
+        : dropHover
+            ? p.purple.withValues(alpha: 0.85)
+            : (selected ? p.selectedTile : Colors.transparent);
 
     return InkWell(
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        height: 80,
+      splashColor: Colors.transparent,
+      highlightColor: Colors.transparent,
+      hoverColor: Colors.transparent,
+      focusColor: Colors.transparent,
+      overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+      child: ColoredBox(
         color: bg,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            AvatarWidget(
-              name: dialog.chatName,
-              avatarUrl: dialog.avatar,
-              avatarColor: dialog.avatarColor,
-              colAvaId: dialog.colAvaId,
-              online: dialog.online,
-              size: 52,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
+        child: SizedBox(
+          height: 80,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                if (selectMode) ...[
+                  _SelectCircle(checked: checked, purple: p.purple),
+                  const SizedBox(width: 12),
+                ],
+                AvatarWidget(
+                  name: dialog.chatName,
+                  avatarUrl: dialog.avatar,
+                  avatarColor: dialog.avatarColor,
+                  colAvaId: dialog.colAvaId,
+                  online: dialog.online,
+                  size: 52,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Flexible(
-                        child: Text(
-                          dialog.chatName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: titleColor,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              dialog.chatName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: titleColor,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
-                        ),
+                          if (dialog.chatMuted) ...[
+                            const SizedBox(width: 6),
+                            Icon(Icons.volume_off_rounded,
+                                size: 15, color: subColor),
+                          ],
+                        ],
                       ),
-                      if (dialog.chatMuted) ...[
-                        const SizedBox(width: 6),
-                        Icon(Icons.volume_off_rounded,
-                            size: 15, color: subColor),
-                      ],
+                      const SizedBox(height: 4),
+                      _subtitle(subColor),
                     ],
                   ),
-                  const SizedBox(height: 4),
-                  _subtitle(subColor),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    if (isOutgoing) ...[
-                      StatusTicks(status: dialog.last_msg_status, size: 15),
-                      const SizedBox(width: 4),
-                    ],
-                    Text(
-                      dialog.last_msg_dttmcr,
-                      style: TextStyle(color: timeColor, fontSize: 13),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (isOutgoing) ...[
+                          StatusTicks(status: dialog.last_msg_status, size: 15),
+                          const SizedBox(width: 4),
+                        ],
+                        Text(
+                          dialog.last_msg_dttmcr,
+                          style: TextStyle(color: timeColor, fontSize: 13),
+                        ),
+                      ],
                     ),
+                    const SizedBox(height: 8),
+                    if (!selectMode) _trailingIndicator(p, emphasized),
                   ],
                 ),
-                const SizedBox(height: 8),
-                _trailingIndicator(p, emphasized),
               ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -182,5 +200,32 @@ class DialogTile extends StatelessWidget {
           size: 16, color: onSelected ? Colors.white70 : p.text2);
     }
     return const SizedBox(width: 20, height: 20);
+  }
+}
+
+class _SelectCircle extends StatelessWidget {
+  final bool checked;
+  final Color purple;
+
+  const _SelectCircle({required this.checked, required this.purple});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: 22,
+      height: 22,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: checked ? purple : Colors.transparent,
+        border: Border.all(
+          color: checked ? purple : purple.withValues(alpha: 0.55),
+          width: 1.5,
+        ),
+      ),
+      child: checked
+          ? const Icon(Icons.check, size: 14, color: Colors.white)
+          : null,
+    );
   }
 }

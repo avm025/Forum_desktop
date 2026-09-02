@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -5,7 +7,9 @@ import 'package:provider/provider.dart';
 import '../models/user_profile.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../widgets/cached_forum_image.dart';
 import '../widgets/profile_avatar_editor.dart';
+import '../widgets/profile_content_frame.dart';
 import 'appearance_screen.dart';
 import 'profile/devices_menu_screen.dart';
 import 'profile/edit_profile_screen.dart';
@@ -31,82 +35,75 @@ class ProfileScreen extends StatelessWidget {
         child: CustomScrollView(
           slivers: [
             SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              child: ProfileContentFrame(
+                child: Column(
                   children: [
-                    // Скан QR слева сверху — как qrAuthBarButton в Forum_ios.
-                    IconButton(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const QrAuthorizeScreen(),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        IconButton(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const QrAuthorizeScreen(),
+                              ),
+                            );
+                          },
+                          tooltip: 'Авторизовать по QR-коду',
+                          icon: Icon(
+                            Icons.qr_code_scanner_rounded,
+                            color: p.purple,
+                            size: 24,
                           ),
-                        );
-                      },
-                      tooltip: 'Авторизовать по QR-коду',
-                      icon: Icon(
-                        Icons.qr_code_scanner_rounded,
-                        color: p.purple,
-                        size: 24,
-                      ),
-                      constraints: const BoxConstraints(
-                        minWidth: 28,
-                        minHeight: 28,
-                      ),
-                      padding: EdgeInsets.zero,
-                    ),
-                    IconButton(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const EditProfileScreen(),
+                          constraints: const BoxConstraints(
+                            minWidth: 28,
+                            minHeight: 28,
                           ),
-                        );
-                      },
-                      tooltip: 'Редактировать',
-                      icon: Icon(
-                        Icons.edit_outlined,
-                        color: p.purple,
-                        size: 24,
-                      ),
-                      constraints: const BoxConstraints(
-                        minWidth: 28,
-                        minHeight: 28,
-                      ),
-                      padding: EdgeInsets.zero,
+                          padding: EdgeInsets.zero,
+                        ),
+                        IconButton(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const EditProfileScreen(),
+                              ),
+                            );
+                          },
+                          tooltip: 'Редактировать',
+                          icon: Icon(
+                            Icons.edit_outlined,
+                            color: p.purple,
+                            size: 24,
+                          ),
+                          constraints: const BoxConstraints(
+                            minWidth: 28,
+                            minHeight: 28,
+                          ),
+                          padding: EdgeInsets.zero,
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: Column(
-                children: [
-                  const SizedBox(height: 4),
-                  const ProfileAvatarEditor(size: 112, plusSize: 32),
-                  const SizedBox(height: 16),
-                  Text(
-                    profile?.name.trim().isNotEmpty == true
-                        ? profile!.name
-                        : 'Пользователь',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: p.text1,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  if (_nick(profile).isNotEmpty) ...[
-                    const SizedBox(height: 4),
-                    _CopyNickButton(nick: _nick(profile)),
-                  ],
-                  if (_about(profile).isNotEmpty) ...[
                     const SizedBox(height: 8),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Text(
+                    _OwnProfileHero(profile: profile, pageBg: pageBg),
+                    const SizedBox(height: 16),
+                    Text(
+                      profile?.name.trim().isNotEmpty == true
+                          ? profile!.name
+                          : 'Пользователь',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: p.text1,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (_nick(profile).isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      _CopyNickButton(nick: _nick(profile)),
+                    ],
+                    if (_about(profile).isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(
                         _about(profile),
                         textAlign: TextAlign.center,
                         style: TextStyle(
@@ -115,15 +112,14 @@ class ProfileScreen extends StatelessWidget {
                           height: 1.16,
                         ),
                       ),
-                    ),
+                    ],
+                    const SizedBox(height: 24),
                   ],
-                  const SizedBox(height: 24),
-                ],
+                ),
               ),
             ),
             SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: ProfileContentFrame(
                 child: _SettingsCard(
                   background: cardBg,
                   separator: separator,
@@ -201,8 +197,8 @@ class ProfileScreen extends StatelessWidget {
               ),
             ),
             SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+              child: ProfileContentFrame(
+                padding: const EdgeInsets.fromLTRB(0, 24, 0, 24),
                 child: _PremiumButton(
                   onTap: () {
                     Navigator.of(context).push(
@@ -229,6 +225,49 @@ class ProfileScreen extends StatelessWidget {
 
   static String _about(UserProfile? profile) {
     return profile?.about.trim() ?? '';
+  }
+}
+
+class _OwnProfileHero extends StatelessWidget {
+  final UserProfile? profile;
+  final Color pageBg;
+
+  const _OwnProfileHero({
+    required this.profile,
+    required this.pageBg,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final avatarUrl = profile?.displayAvatarUrl.trim() ?? '';
+    final hasAva = avatarUrl.isNotEmpty;
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: SizedBox(
+        height: 220,
+        width: double.infinity,
+        child: Stack(
+          fit: StackFit.expand,
+          alignment: Alignment.center,
+          children: [
+            if (hasAva)
+              ImageFiltered(
+                imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                child: CachedForumImage(
+                  url: avatarUrl,
+                  fit: BoxFit.cover,
+                ),
+              )
+            else
+              ColoredBox(color: p.bg3),
+            ColoredBox(color: Colors.black.withValues(alpha: 0.18)),
+            const ProfileAvatarEditor(size: 112, plusSize: 32),
+          ],
+        ),
+      ),
+    );
   }
 }
 

@@ -21,6 +21,9 @@ import 'emoji_reactions.dart';
 import 'forward_dialog_picker.dart';
 import 'location_preview.dart';
 import 'media_grid.dart';
+import '../utils/attachment_selection.dart';
+import '../utils/chat_message_search.dart';
+import '../utils/media_display_name.dart';
 import '../utils/media_message_layout.dart';
 import '../utils/media_file_loader.dart';
 import '../utils/media_file_url.dart';
@@ -35,11 +38,18 @@ import 'voice_message.dart';
 class MessageItem extends StatefulWidget {
   final MessageViewModel message;
   final bool isGroupChat;
+  final String? searchQuery;
+  final bool searchHighlightCurrent;
+  /// На старте чата не рисуем градиент/иконки-заглушки медиа.
+  final bool deferMediaPreview;
 
   const MessageItem({
     super.key,
     required this.message,
     this.isGroupChat = false,
+    this.searchQuery,
+    this.searchHighlightCurrent = false,
+    this.deferMediaPreview = false,
   });
 
   @override
@@ -61,9 +71,17 @@ class _MessageItemState extends State<MessageItem> {
   static const double _maxBubbleFraction = 0.88;
   static const double _maxBubbleWidthCap = 980;
 
-  double _maxBubbleWidth(BuildContext context) {
-    final w = MediaQuery.sizeOf(context).width;
-    return (w * _maxBubbleFraction).clamp(120.0, _maxBubbleWidthCap);
+
+  double _leadingWidth(bool showAvatar, bool continuationIndent) {
+    if (_isMine || !widget.isGroupChat) return 0;
+    if (showAvatar || continuationIndent) return _avatarSize + _avatarGap;
+    return 0;
+  }
+
+  double _bubbleMaxWidth(double rowWidth, double leadingWidth) {
+    final available = rowWidth - leadingWidth;
+    final cap = (rowWidth * _maxBubbleFraction).clamp(120.0, _maxBubbleWidthCap);
+    return available.clamp(120.0, cap);
   }
 
   /// Текст подписи в пузыре. Для file/media не подставляем сырой JSON
@@ -104,81 +122,12 @@ class _MessageItemState extends State<MessageItem> {
   Widget build(BuildContext context) {
     final p = context.palette;
     final state = context.watch<AppState>();
-    final maxBubbleWidth = _maxBubbleWidth(context);
     final onAccent = _isMine;
     final bubblePadding = _bubblePadding();
-    final innerMaxWidth = maxBubbleWidth - bubblePadding.horizontal;
 
     final showAvatar = widget.isGroupChat && !_isMine && _clusterTop;
     final continuationIndent = widget.isGroupChat && !_isMine && !_clusterTop;
-
-    final bubble = GestureDetector(
-      key: _bubbleKey,
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        if (message.isCall) {
-          _callbackFromCallMessage(context);
-          return;
-        }
-        final menu = MessageContextMenuController.instance;
-        if (menu.isOpenFor(_bubbleKey)) {
-          menu.handleBubbleTap(_bubbleKey);
-          return;
-        }
-        // ЛКМ — открыть окно действий/реакций (как раньше на desktop).
-        _showActions();
-      },
-      onSecondaryTapUp: (details) =>
-          _showActions(globalPosition: details.globalPosition),
-      onLongPress: _showActions,
-      child: _Bubble(
-        maxWidth: maxBubbleWidth,
-        borderRadius: _bubbleBorderRadius(),
-        color: onAccent ? p.outgoingBubble : p.bg3,
-        liquidGlass: state.appearance.liquidGlass,
-        opacity: state.appearance.panelOpacity,
-        padding: bubblePadding,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (message.showUserName && !_isMine)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  message.fr_name,
-                  style: TextStyle(
-                    color: state.nameColor(isDark: state.isDark),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            if (message.hasReply)
-              ReplyPreview(
-                message: message,
-                onAccent: onAccent,
-                maxWidth: innerMaxWidth,
-                currentUserId: state.profile?.id,
-                onTap: message.prn_id.trim().isNotEmpty
-                    ? () => ChatScrollScope.maybeOf(context)
-                        ?.scrollToMessage(message.prn_id)
-                    : null,
-              ),
-            _content(context, p, onAccent, innerMaxWidth),
-            if (message.hasReactions)
-              EmojiReactions(
-                reactions: message.emoji,
-                currentUserName: state.profile?.name ?? '',
-                currentUserId: state.profile?.id ?? '',
-                onAccent: onAccent,
-                onReactionTap: _canReact ? _onReactionTap : null,
-              ),
-            if (!_isPlainTextOnly) _footer(p, onAccent, alignEnd: _useWideFooter),
-          ],
-        ),
-      ),
-    );
+    final leadingWidth = _leadingWidth(showAvatar, continuationIndent);
 
     return Padding(
       padding: EdgeInsets.only(
@@ -187,27 +136,113 @@ class _MessageItemState extends State<MessageItem> {
         top: _clusterTop ? 6 : 2,
         bottom: _clusterBottom ? 6 : 2,
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisAlignment:
-            _isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
-        children: [
-          if (!_isMine) ...[
-            if (showAvatar) ...[
-              AvatarWidget(
-                name: message.fr_name,
-                avatarUrl: message.preview,
-                size: _avatarSize,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxBubbleWidth =
+              _bubbleMaxWidth(constraints.maxWidth, leadingWidth);
+          final innerMaxWidth = maxBubbleWidth - bubblePadding.horizontal;
+
+          final bubble = GestureDetector(
+            key: _bubbleKey,
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              if (AttachmentSelection.takeSuppressBubbleTap()) return;
+              if (message.isCall) {
+                _callbackFromCallMessage(context);
+                return;
+              }
+              // ЛКМ меню не открывает — только закрывает, если уже открыто.
+              final menu = MessageContextMenuController.instance;
+              if (menu.isOpenFor(_bubbleKey)) {
+                menu.handleBubbleTap(_bubbleKey);
+              }
+            },
+            onSecondaryTapUp: (details) {
+              if (AttachmentSelection.takeSuppressBubbleTap()) return;
+              _showActions(globalPosition: details.globalPosition);
+            },
+            child: _Bubble(
+              maxWidth: maxBubbleWidth,
+              borderRadius: _bubbleBorderRadius(),
+              color: onAccent ? p.outgoingBubble : p.bg3,
+              liquidGlass: state.appearance.liquidGlass,
+              opacity: state.appearance.panelOpacity,
+              padding: bubblePadding,
+              highlightBorder: widget.searchHighlightCurrent,
+              highlightColor: onAccent ? p.lime : p.purple,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (message.showUserName && !_isMine)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        message.fr_name,
+                        style: TextStyle(
+                          color: state.nameColor(isDark: state.isDark),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (message.hasReply)
+                    ReplyPreview(
+                      message: message,
+                      onAccent: onAccent,
+                      maxWidth: innerMaxWidth,
+                      currentUserId: state.profile?.id,
+                      onTap: message.prn_id.trim().isNotEmpty
+                          ? () => ChatScrollScope.maybeOf(context)
+                              ?.scrollToMessage(message.prn_id)
+                          : null,
+                    ),
+                  _content(context, p, onAccent, innerMaxWidth),
+                  if (message.hasReactions)
+                    EmojiReactions(
+                      reactions: message.emoji,
+                      currentUserName: state.profile?.name ?? '',
+                      currentUserId: state.profile?.id ?? '',
+                      onAccent: onAccent,
+                      onReactionTap: _canReact ? _onReactionTap : null,
+                    ),
+                  if (!_isPlainTextOnly)
+                    _footer(p, onAccent, alignEnd: _useWideFooter),
+                ],
               ),
-              const SizedBox(width: _avatarGap),
-            ] else if (continuationIndent)
-              const SizedBox(width: _avatarSize + _avatarGap),
-          ],
-          Flexible(
-            fit: FlexFit.loose,
-            child: bubble,
-          ),
-        ],
+            ),
+          );
+
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisAlignment:
+                _isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
+            children: [
+              if (!_isMine) ...[
+                if (showAvatar) ...[
+                  AvatarWidget(
+                    name: message.fr_name,
+                    avatarUrl: message.preview,
+                    size: _avatarSize,
+                  ),
+                  const SizedBox(width: _avatarGap),
+                ] else if (continuationIndent)
+                  const SizedBox(width: _avatarSize + _avatarGap),
+              ],
+              Flexible(
+                fit: FlexFit.loose,
+                child: Align(
+                  alignment:
+                      _isMine ? Alignment.centerRight : Alignment.centerLeft,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+                    child: bubble,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -277,6 +312,17 @@ class _MessageItemState extends State<MessageItem> {
     await ChatAttachmentViewer.show(context, file);
   }
 
+  void _onMediaSelectionChanged(List<MediaFile> selected) {
+    // ЛКМ только выделяет; меню — по ПКМ. Пустое выделение закрывает меню.
+    if (selected.isEmpty) {
+      MessageContextMenuController.instance.closeIfOpenFor(_bubbleKey);
+    }
+  }
+
+  void _onAttachmentContextMenu(Offset globalPosition) {
+    unawaited(_showActions(globalPosition: globalPosition));
+  }
+
   /// Документы: открытие только если файл уже загружен («Загрузить»).
   Future<void> _openDocumentIfDownloaded(
     BuildContext context,
@@ -289,12 +335,15 @@ class _MessageItemState extends State<MessageItem> {
 
   MediaFile _legacyMediaFile() {
     if (message.files.isNotEmpty) return message.files.first;
-    final fname = message.fileTitle ?? '';
+    final title = MediaDisplayName.resolve(
+      title: message.fileTitle,
+      dttmcr: message.dttmcr,
+    );
     final file = MediaFile(
       url: message.url,
       fdir: message.fdir,
-      fname: fname.isNotEmpty ? fname : 'document',
-      title: message.fileTitle ?? '',
+      fname: title,
+      title: title,
     );
     if (file.url.trim().isEmpty) {
       file.url = MediaFileUrl.resolve(file);
@@ -305,8 +354,17 @@ class _MessageItemState extends State<MessageItem> {
   String? get _copyText {
     final value = _textValue.trim();
     if (value.isNotEmpty) return value;
+    if (message.files.isNotEmpty) {
+      return MediaDisplayName.forFile(
+        message.files.first,
+        dttmcr: message.dttmcr,
+      );
+    }
     if ((message.fileTitle ?? '').trim().isNotEmpty) {
-      return message.fileTitle!.trim();
+      return MediaDisplayName.resolve(
+        title: message.fileTitle,
+        dttmcr: message.dttmcr,
+      );
     }
     return null;
   }
@@ -449,7 +507,10 @@ class _MessageItemState extends State<MessageItem> {
           MediaGrid(
             files: message.files,
             maxWidth: innerMaxWidth,
+            deferPreview: widget.deferMediaPreview,
             onFileTap: (file) => _openFile(context, file),
+            onSelectionChanged: _onMediaSelectionChanged,
+            onContextMenu: _onAttachmentContextMenu,
           ),
           if (_hasText)
             Padding(
@@ -484,6 +545,8 @@ class _MessageItemState extends State<MessageItem> {
       onAccent: onAccent,
       maxWidth: innerMaxWidth,
       onOpen: (file) => _openDocumentIfDownloaded(context, file),
+      onSelectionChanged: _onMediaSelectionChanged,
+      onContextMenu: _onAttachmentContextMenu,
       footer: _hasText
           ? _textWithFooter(p, onAccent, innerMaxWidth)
           : null,
@@ -501,6 +564,8 @@ class _MessageItemState extends State<MessageItem> {
           fontSize: 15,
           height: 1.35,
         ),
+        searchQuery: widget.searchQuery,
+        highlightColor: onAccent ? p.lime.withValues(alpha: 0.45) : p.purple.withValues(alpha: 0.35),
         onSimpleTap: _onTextSimpleTap,
       ),
     );
@@ -510,22 +575,17 @@ class _MessageItemState extends State<MessageItem> {
     if (!_hasText) return const SizedBox.shrink();
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 2,
-        crossAxisAlignment: WrapCrossAlignment.end,
-        children: [
-          _MessageBodyText(
-            text: _textValue,
-            style: TextStyle(
-              color: onAccent ? Colors.white : p.text1,
-              fontSize: 15,
-              height: 1.35,
-            ),
-            onSimpleTap: _onTextSimpleTap,
-          ),
-          _footerMeta(p, onAccent),
-        ],
+      child: _MessageBodyText(
+        text: _textValue,
+        style: TextStyle(
+          color: onAccent ? Colors.white : p.text1,
+          fontSize: 15,
+          height: 1.35,
+        ),
+        searchQuery: widget.searchQuery,
+        highlightColor: onAccent ? p.lime.withValues(alpha: 0.45) : p.purple.withValues(alpha: 0.35),
+        footer: _footerMeta(p, onAccent),
+        onSimpleTap: _onTextSimpleTap,
       ),
     );
   }
@@ -535,12 +595,11 @@ class _MessageItemState extends State<MessageItem> {
       _callbackFromCallMessage(context);
       return;
     }
+    // ЛКМ по тексту меню не открывает.
     final menu = MessageContextMenuController.instance;
     if (menu.isOpenFor(_bubbleKey)) {
       menu.handleBubbleTap(_bubbleKey);
-      return;
     }
-    _showActions();
   }
 
   Widget _footer(ForumPalette p, bool onAccent, {required bool alignEnd}) {
@@ -604,6 +663,8 @@ class _Bubble extends StatelessWidget {
   final Widget child;
   final bool liquidGlass;
   final double opacity;
+  final bool highlightBorder;
+  final Color? highlightColor;
 
   const _Bubble({
     required this.maxWidth,
@@ -613,6 +674,8 @@ class _Bubble extends StatelessWidget {
     required this.child,
     this.liquidGlass = false,
     this.opacity = 1,
+    this.highlightBorder = false,
+    this.highlightColor,
   });
 
   @override
@@ -639,9 +702,21 @@ class _Bubble extends StatelessWidget {
       );
     }
 
+    if (highlightBorder && highlightColor != null) {
+      bubble = DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: highlightColor!, width: 2),
+          borderRadius: borderRadius,
+        ),
+        child: bubble,
+      );
+    }
+
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
-      child: IntrinsicWidth(child: bubble),
+      child: IntrinsicWidth(
+        child: bubble,
+      ),
     );
   }
 }
@@ -651,11 +726,17 @@ class _Bubble extends StatelessWidget {
 class _MessageBodyText extends StatefulWidget {
   final String text;
   final TextStyle style;
+  final Widget? footer;
+  final String? searchQuery;
+  final Color? highlightColor;
   final VoidCallback onSimpleTap;
 
   const _MessageBodyText({
     required this.text,
     required this.style,
+    this.footer,
+    this.searchQuery,
+    this.highlightColor,
     required this.onSimpleTap,
   });
 
@@ -697,6 +778,31 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
     _dragged = false;
   }
 
+  Widget _buildVisibleText() {
+    final query = widget.searchQuery?.trim();
+    if (query == null || query.isEmpty) {
+      return Text(widget.text, style: widget.style);
+    }
+
+    final parts = ChatMessageSearch.highlightParts(widget.text, query);
+    final highlight = widget.highlightColor ??
+        (widget.style.color ?? Colors.white).withValues(alpha: 0.35);
+
+    return Text.rich(
+      TextSpan(
+        children: [
+          for (final part in parts)
+            TextSpan(
+              text: part.text,
+              style: widget.style.copyWith(
+                backgroundColor: part.match ? highlight : null,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Listener(
@@ -705,13 +811,33 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
       onPointerMove: _onPointerMove,
       onPointerUp: _onPointerUp,
       onPointerCancel: _onPointerCancel,
-      child: SelectableText(
-        widget.text,
-        style: widget.style,
-        // Без системного окна Copy / Look Up / Share при выделении.
-        contextMenuBuilder: (context, editableTextState) =>
-            const SizedBox.shrink(),
-        magnifierConfiguration: TextMagnifierConfiguration.disabled,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Stack(
+            children: [
+              _buildVisibleText(),
+              SelectableText(
+                widget.text,
+                style: widget.style.copyWith(color: Colors.transparent),
+                selectionColor: (widget.style.color ?? Colors.white)
+                    .withValues(alpha: 0.35),
+                contextMenuBuilder: (context, editableTextState) =>
+                    const SizedBox.shrink(),
+                magnifierConfiguration: TextMagnifierConfiguration.disabled,
+              ),
+            ],
+          ),
+          if (widget.footer != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: widget.footer,
+              ),
+            ),
+        ],
       ),
     );
   }

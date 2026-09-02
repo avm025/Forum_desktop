@@ -244,13 +244,15 @@ class _MessageInputState extends State<MessageInput> {
   Future<void> _send() async {
     final text = EmoticonReplacer.replace(_controller.text.trim());
     if (text.isEmpty) return;
-    await context.read<AppState>().sendMessage(text);
-    if (!mounted) return;
+
+    // Очищаем поле до append скелета — пузырь и текст в одном кадре.
     _syncingText = true;
     _controller.clear();
     _syncingText = false;
-    setState(() => _hasText = false);
+    if (_hasText) setState(() => _hasText = false);
     context.read<AppState>().reportComposerText('');
+
+    await context.read<AppState>().sendMessage(text);
   }
 
   Future<void> _openAttachMenu() async {

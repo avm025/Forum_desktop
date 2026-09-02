@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../api/api_config.dart';
 import '../models/media_file.dart';
+import 'media_display_name.dart';
 
 /// Локальный путь или байты вложения для просмотра в чате.
 class MediaFileSource {
@@ -154,15 +155,9 @@ class MediaFileLoader {
     return File('${dir.path}/${displayFileName(file)}');
   }
 
-  /// Имя на диске = то же, что видно в сообщении (`title`, иначе `fname`).
+  /// Имя на диске = то же, что видно в сообщении.
   static String displayFileName(MediaFile file) {
-    final title = file.title.trim();
-    final fname = file.fname.trim();
-    final raw = title.isNotEmpty
-        ? title
-        : (fname.isNotEmpty ? fname : 'document');
-    final cleaned = raw.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
-    return cleaned.isNotEmpty ? cleaned : 'document';
+    return MediaDisplayName.forSave(file);
   }
 
   static String _cacheKey(MediaFile file) {
@@ -205,10 +200,7 @@ class MediaFileLoader {
     final response = await http
         .get(
           Uri.parse(url),
-          headers: {
-            'Authorization': 'Bearer ${ApiConfig.token}',
-            'Key': ApiConfig.apiKey,
-          },
+          headers: ApiConfig.fileHeaders,
         )
         .timeout(const Duration(seconds: 90));
     if (response.statusCode < 200 || response.statusCode >= 300) {

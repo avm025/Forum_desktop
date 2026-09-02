@@ -10,12 +10,19 @@ import '../../models/dialogs_list_view_model.dart';
 import '../../models/dlg_info_member.dart';
 import '../../models/media_file.dart';
 import '../../models/message_view_model.dart';
+import '../../services/media_thumb_cache.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_theme.dart';
+import '../../utils/file_kind.dart';
+import '../../utils/media_display_name.dart';
+import '../../utils/media_file_loader.dart';
+import '../../utils/media_file_url.dart';
 import '../../utils/reaction_utils.dart';
 import '../../widgets/avatar_widget.dart';
 import '../../widgets/cached_forum_image.dart';
-import '../../widgets/fullscreen_image_view.dart';
+import '../../widgets/chat_attachment_viewer.dart';
+import '../../widgets/profile_content_frame.dart';
+import '../../widgets/voice_message.dart';
 
 /// Профиль собеседника / группы — порт iOS `AnotherProfileViewController`.
 class PeerProfileScreen extends StatefulWidget {
@@ -26,7 +33,8 @@ class PeerProfileScreen extends StatefulWidget {
   static Future<void> open(BuildContext context, DialogsListViewModel dialog) {
     final id = dialog.id?.trim() ?? '';
     if (id.isEmpty) return Future.value();
-    return Navigator.of(context).push(
+    // rootNavigator: локальный Navigator в панели чата убран (краш Overlay).
+    return Navigator.of(context, rootNavigator: true).push(
       MaterialPageRoute<void>(
         builder: (_) => PeerProfileScreen(dialogId: id),
       ),
@@ -64,6 +72,13 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
       if (AppState.dlgIdsEqual(d.id, widget.dialogId)) return d;
     }
     return state.selectedDialog;
+  }
+
+  void _openChatSearch() {
+    final dlgId = widget.dialogId.trim();
+    if (dlgId.isEmpty) return;
+    context.read<AppState>().requestChatSearch(dlgId);
+    Navigator.of(context).pop();
   }
 
   Future<void> _loadInfo() async {
@@ -134,10 +149,87 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
     return tabs;
   }
 
+  static bool _isImageMediaFile(MediaFile f) {
+    if (f.isVideo) return false;
+    const images = {
+      'jpg',
+      'jpeg',
+      'png',
+      'gif',
+      'webp',
+      'heic',
+      'heif',
+      'bmp',
+      'img',
+      'image',
+    };
+    final kind = f.kind.toLowerCase();
+    final ext = FileKind.extensionFromName(
+      f.fname.isNotEmpty ? f.fname : f.title,
+    );
+    return images.contains(kind) || images.contains(ext);
+  }
+
+  MediaFile _normalizeMediaFile(MediaFile source, MessageViewModel? message) {
+    final file = MediaFile(
+      hash: source.hash,
+      url: source.url,
+      fname: source.fname,
+      fdir: source.fdir,
+      kind: source.kind,
+      preview: source.preview,
+      title: source.title,
+      size: source.size,
+      width: source.width,
+      height: source.height,
+      duration: source.duration,
+      uploaded: source.uploaded,
+      URL: source.URL,
+      bytes: source.bytes,
+    );
+
+    if (file.fname.trim().isEmpty && message != null) {
+      final title = (message.fileTitle ?? '').trim();
+      if (title.isNotEmpty) file.fname = title;
+    }
+    file.title = MediaDisplayName.forFile(
+      file,
+      dttmcr: message?.dttmcr,
+    );
+    if (file.url.trim().isEmpty && message != null) {
+      file.url = message.url;
+      file.fdir = message.fdir;
+    }
+    if (file.preview.trim().isEmpty && message != null) {
+      file.preview = message.preview;
+    }
+    if (file.url.trim().isEmpty) {
+      file.url = MediaFileUrl.resolve(file);
+    }
+    return file;
+  }
+
+  MediaFile _legacyFileFromMessage(MessageViewModel m) {
+    final title = MediaDisplayName.resolve(
+      title: m.fileTitle ?? m.text,
+      dttmcr: m.dttmcr,
+    );
+    return _normalizeMediaFile(
+      MediaFile(
+        url: m.url,
+        fdir: m.fdir,
+        fname: title,
+        title: title,
+        kind: (m.fileFormat ?? FileKind.kindFromName(title)).toLowerCase(),
+      ),
+      m,
+    );
+  }
+
   _MediaBuckets _collectMedia(List<MessageViewModel> messages) {
     final photos = <MediaFile>[];
     final videos = <MediaFile>[];
-    final files = <_FileRow>[];
+    final files = <MediaFile>[];
     final voices = <MessageViewModel>[];
     final links = <_LinkRow>[];
 
@@ -147,17 +239,21 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
         voices.add(m);
         continue;
       }
+      if (m.files.isNotEmpty) {
+        for (final raw in m.files) {
+          final f = _normalizeMediaFile(raw, m);
+          if (f.isVideo || FileKind.isVideoKind(f.kind)) {
+            videos.add(f);
+          } else if (_isImageMediaFile(f)) {
+            photos.add(f);
+          } else {
+            files.add(f);
+          }
+        }
+        continue;
+      }
       if (t == 'file' || m.isFile) {
-        files.add(_FileRow(
-          title: (m.fileTitle ?? m.text).trim().isEmpty
-              ? 'Файл'
-              : (m.fileTitle ?? m.text).trim(),
-          subtitle: [
-            if ((m.fileSize ?? '').isNotEmpty) m.fileSize!,
-            if ((m.fileFormat ?? '').isNotEmpty) m.fileFormat!,
-          ].join(' · '),
-          url: m.url,
-        ));
+        files.add(_legacyFileFromMessage(m));
         continue;
       }
       if (t == 'text' || t == 'msg' || t.isEmpty) {
@@ -169,22 +265,19 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
             time: m.dtshow.isNotEmpty ? m.dtshow : m.dttmcr,
           ));
         }
-      }
-      if (m.files.isNotEmpty) {
-        for (final f in m.files) {
-          if (f.isVideo) {
-            videos.add(f);
-          } else if (f.url.isNotEmpty || (f.bytes?.isNotEmpty ?? false)) {
-            photos.add(f);
-          }
-        }
         continue;
       }
       if (t == 'video') {
-        videos.add(MediaFile(url: m.url, preview: m.preview, kind: 'mp4'));
+        videos.add(_normalizeMediaFile(
+          MediaFile(url: m.url, preview: m.preview, kind: 'mp4'),
+          m,
+        ));
       } else if (t == 'image' || t == 'img' || t == 'photo' || t == 'media') {
-        if (m.url.isNotEmpty) {
-          photos.add(MediaFile(url: m.url, preview: m.preview));
+        if (m.url.isNotEmpty || m.preview.isNotEmpty) {
+          photos.add(_normalizeMediaFile(
+            MediaFile(url: m.url, preview: m.preview),
+            m,
+          ));
         }
       }
     }
@@ -398,9 +491,10 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
             slivers: [
               SliverToBoxAdapter(child: _HeroHeader(dialog: dialog)),
               SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                child: ProfileContentFrame(
+                  padding: const EdgeInsets.only(top: 16),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Text(
                         dialog.chatName,
@@ -424,21 +518,21 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
                       _ActionStrip(
                         fav: dialog.fav,
                         isGroup: isGrp,
+                        canCall: !dialog.fav &&
+                            (isGrp ||
+                                (dialog.usr_id?.trim().isNotEmpty ?? false)),
                         muted: _muted,
-                        onChat: () => Navigator.of(context).maybePop(),
-                        onSearch: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Поиск — скоро')),
-                          );
-                        },
+                        onAudioCall: () => context
+                            .read<AppState>()
+                            .startCallFromChat(video: false),
+                        onVideoCall: () => context
+                            .read<AppState>()
+                            .startCallFromChat(video: true),
+                        onSearch: _openChatSearch,
                         onMute: () => setState(() => _muted = !_muted),
                         onLeave: () => _onMoreAction(dialog, 'Покинуть группу'),
                         onMore: () => _showMoreMenu(dialog),
-                        onFavSearch: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Поиск — скоро')),
-                          );
-                        },
+                        onFavSearch: _openChatSearch,
                         onFavClear: () {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('Очистить — скоро')),
@@ -502,30 +596,41 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
           ),
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(
-                children: [
-                  _ChromeButton(
-                    icon: Icons.arrow_back_ios_new_rounded,
-                    onTap: () => Navigator.of(context).maybePop(),
+              padding: const EdgeInsets.symmetric(
+                horizontal: ProfileLayout.horizontalInset,
+                vertical: 4,
+              ),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    maxWidth: ProfileLayout.maxContentWidth,
                   ),
-                  const Spacer(),
-                  if (!dialog.fav)
-                    _ChromeButton(
-                      icon: Icons.edit_outlined,
-                      onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              isGrp
-                                  ? 'Настройки группы — скоро'
-                                  : 'Редактирование — скоро',
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                ],
+                  child: Row(
+                    children: [
+                      _ChromeButton(
+                        icon: Icons.arrow_back_ios_new_rounded,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                      const Spacer(),
+                      if (!dialog.fav)
+                        _ChromeButton(
+                          icon: Icons.edit_outlined,
+                          onTap: () {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  isGrp
+                                      ? 'Настройки группы — скоро'
+                                      : 'Редактирование — скоро',
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -544,34 +649,39 @@ class _HeroHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = context.palette;
     final hasAva = dialog.avatar.trim().isNotEmpty;
-    return SizedBox(
-      height: 285,
-      width: double.infinity,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (hasAva)
-            ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-              child: CachedForumImage(
-                url: dialog.avatar,
-                fit: BoxFit.cover,
+    return ProfileContentFrame(
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          height: 285,
+          width: double.infinity,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (hasAva)
+                ImageFiltered(
+                  imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                  child: CachedForumImage(
+                    url: dialog.avatar,
+                    fit: BoxFit.cover,
+                  ),
+                )
+              else
+                ColoredBox(color: p.bg3),
+              ColoredBox(color: Colors.black.withValues(alpha: 0.22)),
+              Center(
+                child: AvatarWidget(
+                  name: dialog.chatName,
+                  avatarUrl: dialog.avatar,
+                  avatarColor: dialog.avatarColor,
+                  colAvaId: dialog.colAvaId,
+                  online: dialog.online,
+                  size: 112,
+                ),
               ),
-            )
-          else
-            ColoredBox(color: p.bg3),
-          ColoredBox(color: Colors.black.withValues(alpha: 0.22)),
-          Center(
-            child: AvatarWidget(
-              name: dialog.chatName,
-              avatarUrl: dialog.avatar,
-              avatarColor: dialog.avatarColor,
-              colAvaId: dialog.colAvaId,
-              online: dialog.online,
-              size: 112,
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -604,8 +714,10 @@ class _ChromeButton extends StatelessWidget {
 class _ActionStrip extends StatelessWidget {
   final bool fav;
   final bool isGroup;
+  final bool canCall;
   final bool muted;
-  final VoidCallback onChat;
+  final VoidCallback onAudioCall;
+  final VoidCallback onVideoCall;
   final VoidCallback onSearch;
   final VoidCallback onMute;
   final VoidCallback onLeave;
@@ -616,8 +728,10 @@ class _ActionStrip extends StatelessWidget {
   const _ActionStrip({
     required this.fav,
     required this.isGroup,
+    required this.canCall,
     required this.muted,
-    required this.onChat,
+    required this.onAudioCall,
+    required this.onVideoCall,
     required this.onSearch,
     required this.onMute,
     required this.onLeave,
@@ -647,8 +761,13 @@ class _ActionStrip extends StatelessWidget {
         _ActionItem(Icons.more_horiz_rounded, 'Ещё', onMore),
       ]);
     } else {
+      if (canCall) {
+        actions.addAll([
+          _ActionItem(Icons.call_rounded, 'Аудио', onAudioCall),
+          _ActionItem(Icons.videocam_rounded, 'Видео', onVideoCall),
+        ]);
+      }
       actions.addAll([
-        _ActionItem(Icons.chat_bubble_outline_rounded, 'Чат', onChat),
         _ActionItem(Icons.search_rounded, 'Поиск', onSearch),
         _ActionItem(
           muted ? Icons.notifications_off_outlined : Icons.volume_up_rounded,
@@ -810,15 +929,17 @@ class _InfoRow extends StatelessWidget {
           children: [
             Expanded(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Text(
                     title,
+                    textAlign: TextAlign.center,
                     style: TextStyle(color: p.text3, fontSize: 11),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     value,
+                    textAlign: TextAlign.center,
                     style: TextStyle(color: valueColor, fontSize: 15),
                   ),
                 ],
@@ -891,34 +1012,41 @@ class _TabStrip extends StatelessWidget {
     final p = context.palette;
     return SizedBox(
       height: 42,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: tabs.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (context, i) {
-          final t = tabs[i];
-          final selected = t == active;
-          return InkWell(
-            onTap: () => onSelect(t),
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: selected ? p.lime.withValues(alpha: 0.15) : p.bg2,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                _label(t),
-                style: TextStyle(
-                  color: selected ? p.lime : p.text3,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
+      child: Center(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              for (var i = 0; i < tabs.length; i++) ...[
+                if (i > 0) const SizedBox(width: 8),
+                InkWell(
+                  onTap: () => onSelect(tabs[i]),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    alignment: Alignment.center,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: tabs[i] == active
+                          ? p.lime.withValues(alpha: 0.15)
+                          : p.bg2,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      _label(tabs[i]),
+                      style: TextStyle(
+                        color: tabs[i] == active ? p.lime : p.text3,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          );
-        },
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -972,31 +1100,16 @@ class _TabBody extends StatelessWidget {
         return Column(
           children: [
             for (final f in media.files)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.insert_drive_file_outlined, color: p.lime),
-                title: Text(f.title, style: TextStyle(color: p.text1)),
-                subtitle: f.subtitle.isEmpty
-                    ? null
-                    : Text(f.subtitle, style: TextStyle(color: p.text2)),
-              ),
+              _ProfileFileRow(key: ValueKey(f.hash + f.url + f.fname), file: f),
           ],
         );
       case _MediaTab.voice:
         return Column(
           children: [
             for (final v in media.voices)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.mic_none_rounded, color: p.lime),
-                title: Text(
-                  v.fr_name.isNotEmpty ? v.fr_name : 'Голосовое',
-                  style: TextStyle(color: p.text1),
-                ),
-                subtitle: Text(
-                  v.dtshow.isNotEmpty ? v.dtshow : v.dttmcr,
-                  style: TextStyle(color: p.text2, fontSize: 12),
-                ),
+              _ProfileVoiceRow(
+                key: ValueKey(v.id + v.hash + v.dttmcr),
+                message: v,
               ),
           ],
         );
@@ -1041,29 +1154,403 @@ class _MediaGrid extends StatelessWidget {
         crossAxisCount: 3,
         mainAxisSpacing: 4,
         crossAxisSpacing: 4,
+        childAspectRatio: 1,
       ),
       itemBuilder: (context, i) {
-        final f = files[i];
-        final url = f.preview.isNotEmpty ? f.preview : f.url;
-        return GestureDetector(
-          onTap: () {
-            if (!isVideo) FullscreenImageViewer.show(context, f);
-          },
+        return _ProfileMediaCell(
+          key: ValueKey('${files[i].hash}_${files[i].url}_${files[i].fname}'),
+          file: files[i],
+          isVideo: isVideo,
+        );
+      },
+    );
+  }
+}
+
+/// Превью фото/видео в профиле + открытие через тот же viewer, что в чате.
+class _ProfileMediaCell extends StatelessWidget {
+  final MediaFile file;
+  final bool isVideo;
+
+  const _ProfileMediaCell({
+    super.key,
+    required this.file,
+    required this.isVideo,
+  });
+
+  String get _imageUrl {
+    final preview = file.preview.trim();
+    if (preview.startsWith('http://') || preview.startsWith('https://')) {
+      return preview;
+    }
+    return MediaFileUrl.resolve(file);
+  }
+
+  Future<void> _open(BuildContext context) async {
+    try {
+      await ChatAttachmentViewer.show(context, file);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось открыть')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: AspectRatio(
+        aspectRatio: 1,
+        child: GestureDetector(
+          onTap: () => _open(context),
           child: Stack(
             fit: StackFit.expand,
             children: [
-              if (url.isNotEmpty)
-                CachedForumImage(url: url, fit: BoxFit.cover)
+              if (isVideo)
+                _ProfileVideoThumb(file: file)
               else
-                ColoredBox(color: context.palette.bg3),
+                CachedForumImage(
+                  url: _imageUrl,
+                  fit: BoxFit.cover,
+                ),
               if (isVideo)
                 const Center(
-                  child: Icon(Icons.play_circle_fill, color: Colors.white70, size: 32),
+                  child: Icon(
+                    Icons.play_circle_fill,
+                    color: Colors.white70,
+                    size: 32,
+                  ),
                 ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProfileVideoThumb extends StatefulWidget {
+  final MediaFile file;
+
+  const _ProfileVideoThumb({required this.file});
+
+  @override
+  State<_ProfileVideoThumb> createState() => _ProfileVideoThumbState();
+}
+
+class _ProfileVideoThumbState extends State<_ProfileVideoThumb> {
+  ImageProvider? _thumb;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final file = await MediaThumbCache.ensureThumbnail(widget.file);
+      if (mounted) {
+        setState(() {
+          _thumb = FileImage(file);
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    if (_thumb != null) {
+      return Image(image: _thumb!, fit: BoxFit.cover, gaplessPlayback: true);
+    }
+    if (_loading) {
+      return ColoredBox(
+        color: p.bg3,
+        child: Center(
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2, color: p.lime),
+          ),
+        ),
+      );
+    }
+    return ColoredBox(
+      color: p.bg3,
+      child: Icon(Icons.videocam_outlined, color: p.text3),
+    );
+  }
+}
+
+/// Строка голосового в профиле — как файлы: слева, на всю ширину.
+class _ProfileVoiceRow extends StatelessWidget {
+  final MessageViewModel message;
+
+  const _ProfileVoiceRow({super.key, required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final title = message.fr_name.isNotEmpty ? message.fr_name : 'Голосовое';
+    final time = message.dtshow.isNotEmpty ? message.dtshow : message.dttmcr;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: p.bg2,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 48,
+                height: 48,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: p.purple.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(Icons.mic_none_rounded, color: p.lime, size: 24),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: p.text1, fontSize: 15),
+                    ),
+                    if (time.isNotEmpty)
+                      Text(
+                        time,
+                        style: TextStyle(color: p.text2, fontSize: 12),
+                      ),
+                    const SizedBox(height: 6),
+                    VoiceMessage(message: message, expand: true),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Строка файла в профиле: скрепка = ещё не загружен на диск.
+class _ProfileFileRow extends StatefulWidget {
+  final MediaFile file;
+
+  const _ProfileFileRow({super.key, required this.file});
+
+  @override
+  State<_ProfileFileRow> createState() => _ProfileFileRowState();
+}
+
+class _ProfileFileRowState extends State<_ProfileFileRow> {
+  bool _downloaded = false;
+  bool _checking = true;
+  bool _busy = false;
+  ImageProvider? _preview;
+
+  MediaFile get file => widget.file;
+
+  String get _title => MediaDisplayName.forFile(file);
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    setState(() {
+      _checking = true;
+      _preview = null;
+    });
+    final downloaded = await MediaFileLoader.isDownloaded(
+      file,
+      downloadUrl: MediaFileUrl.resolve(file),
+    );
+    if (!mounted) return;
+    setState(() {
+      _downloaded = downloaded;
+      _checking = false;
+    });
+    await _loadPreview();
+  }
+
+  bool _looksLikeImage() {
+    final name = file.fname.isNotEmpty ? file.fname : file.title;
+    return FileKind.isImageKind(file.kind) || FileKind.isImageName(name);
+  }
+
+  Future<void> _loadPreview() async {
+    if (!_looksLikeImage()) return;
+    try {
+      final thumb = await MediaThumbCache.ensureThumbnail(file);
+      if (mounted) setState(() => _preview = FileImage(thumb));
+    } catch (_) {}
+  }
+
+  Future<void> _ensureAndOpen() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      if (!_downloaded) {
+        await MediaFileLoader.ensureCached(
+          file,
+          downloadUrl: MediaFileUrl.resolve(file),
         );
-      },
+        if (!mounted) return;
+        setState(() => _downloaded = true);
+      }
+      if (!mounted) return;
+      await ChatAttachmentViewer.show(context, file);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось открыть файл')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final meta = [
+      if (file.humanSize.isNotEmpty) file.humanSize,
+      if (file.formatLabel.isNotEmpty) file.formatLabel,
+    ].join(' · ');
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: p.bg2,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: _ensureAndOpen,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: p.purple.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: _preview != null
+                              ? Image(image: _preview!, fit: BoxFit.cover)
+                              : Center(
+                                  child: Text(
+                                    file.formatLabel.isNotEmpty
+                                        ? file.formatLabel
+                                        : 'FILE',
+                                    style: TextStyle(
+                                      color: p.purple,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                      ),
+                      if (!_downloaded && !_checking)
+                        ColoredBox(
+                          color: Colors.black.withValues(alpha: 0.28),
+                          child: Center(
+                            child: Icon(
+                              Icons.attach_file_rounded,
+                              color: p.lime,
+                              size: 22,
+                            ),
+                          ),
+                        )
+                      else if (_downloaded && !_checking && !_busy)
+                        Positioned(
+                          right: 2,
+                          bottom: 2,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.55),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(2),
+                              child: Icon(
+                                Icons.folder_rounded,
+                                color: p.lime,
+                                size: 14,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (_checking || _busy)
+                        ColoredBox(
+                          color: Colors.black.withValues(alpha: 0.28),
+                          child: Center(
+                            child: SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: p.lime,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: p.text1, fontSize: 15),
+                      ),
+                      if (meta.isNotEmpty)
+                        Text(
+                          meta,
+                          style: TextStyle(color: p.text2, fontSize: 12),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1071,7 +1558,7 @@ class _MediaGrid extends StatelessWidget {
 class _MediaBuckets {
   final List<MediaFile> photos;
   final List<MediaFile> videos;
-  final List<_FileRow> files;
+  final List<MediaFile> files;
   final List<MessageViewModel> voices;
   final List<_LinkRow> links;
 
@@ -1081,17 +1568,6 @@ class _MediaBuckets {
     required this.files,
     required this.voices,
     required this.links,
-  });
-}
-
-class _FileRow {
-  final String title;
-  final String subtitle;
-  final String url;
-  const _FileRow({
-    required this.title,
-    required this.subtitle,
-    required this.url,
   });
 }
 

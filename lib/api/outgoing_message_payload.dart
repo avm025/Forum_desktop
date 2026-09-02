@@ -4,6 +4,7 @@ import '../models/dialogs_list_view_model.dart';
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
 import '../utils/emoticon_replacer.dart';
+import '../utils/media_display_name.dart';
 import 'forward_mapper.dart';
 import 'msg_list_cursors.dart';
 import 'msg_list_merge.dart';
@@ -180,7 +181,7 @@ class OutgoingMessagePayload {
                 kind: f.kind,
                 size: f.size,
               ).toDocumentFileJson(
-                title: f.title.isNotEmpty ? f.title : f.fname,
+                title: MediaDisplayName.forFile(f, dttmcr: message.dttmcr),
               ),
             )
             .toList(),

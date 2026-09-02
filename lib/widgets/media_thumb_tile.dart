@@ -15,6 +15,8 @@ class MediaThumbTile extends StatefulWidget {
   final double width;
   final double height;
   final BoxFit fit;
+  /// Без градиента/иконки/спиннера, пока файл не готов.
+  final bool blankWhileLoading;
 
   const MediaThumbTile({
     super.key,
@@ -22,6 +24,7 @@ class MediaThumbTile extends StatefulWidget {
     required this.width,
     required this.height,
     this.fit = BoxFit.contain,
+    this.blankWhileLoading = false,
   });
 
   @override
@@ -183,6 +186,13 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
   }
 
   Widget _placeholder(double w, double h, {bool error = false}) {
+    if (widget.blankWhileLoading && !error) {
+      return SizedBox(
+        width: w,
+        height: h,
+        child: const ColoredBox(color: Color(0x22000000)),
+      );
+    }
     final media = widget.file;
     final gradient = AppColors.avatarGradientFor(
       media.hash.isNotEmpty ? media.hash : media.url,

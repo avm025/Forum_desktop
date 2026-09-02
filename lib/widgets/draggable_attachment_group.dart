@@ -44,9 +44,12 @@ class DraggableAttachmentGroup extends StatefulWidget {
   });
 
   static String fileId(MediaFile file, int index) {
-    if (file.hash.isNotEmpty) return file.hash;
-    if (file.fname.isNotEmpty) return '${file.fname}_$index';
-    return 'file_$index';
+    // Индекс всегда в ключе: иначе у альбома с одинаковым hash
+    // выделение одного файла подсвечивает все.
+    final base = file.hash.trim().isNotEmpty
+        ? file.hash.trim()
+        : (file.fname.trim().isNotEmpty ? file.fname.trim() : 'file');
+    return '${base}_$index';
   }
 
   @override

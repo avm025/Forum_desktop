@@ -34,6 +34,9 @@ import '../models/dialog_group.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/dlg_info_member.dart';
 import '../models/forum_database.dart';
+import '../models/global_search_chat_group.dart';
+import '../models/global_search_hit.dart';
+import '../models/global_search_scope.dart';
 import '../models/telegram_reactions.dart';
 import '../models/media_file.dart';
 import '../models/message_emoji_model.dart';
@@ -47,9 +50,11 @@ import '../services/firebase_service.dart';
 import '../services/forum_cache.dart';
 import '../theme/app_theme.dart';
 import '../theme/appearance_resolver.dart';
+import '../utils/global_search.dart';
 import '../utils/chat_file_dnd.dart';
 import '../utils/emoticon_replacer.dart';
 import '../utils/folder_list_codec.dart';
+import '../utils/media_display_name.dart';
 import '../utils/media_preprocessor.dart';
 import '../utils/reaction_utils.dart';
 
@@ -168,6 +173,18 @@ class AppState extends ChangeNotifier {
   String get activeTab => _activeTab;
 
   String _search = '';
+  String? _chatSearchRequestDlgId;
+  bool _globalSearchRibbonVisible = false;
+  GlobalSearchScope _globalSearchScope = GlobalSearchScope.chats;
+  Timer? _globalSearchPreloadDebounce;
+  int _globalSearchPreloadToken = 0;
+  bool _globalSearchPreloading = false;
+  int _globalSearchPreloadDone = 0;
+  int _globalSearchPreloadTotal = 0;
+  final Map<String, Future<void>> _olderMessageLoadsInFlight = {};
+  String? _openMessageRequestDlgId;
+  String? _openMessageRequestId;
+  String? _activeGlobalSearchHitKey;
 
   BottomNavTab _navTab = BottomNavTab.chats;
   BottomNavTab get navTab => _navTab;
@@ -190,9 +207,124 @@ class AppState extends ChangeNotifier {
   bool get profileAvatarUploading => _profileAvatarUploading;
 
   String get search => _search;
+  String? get chatSearchRequestDlgId => _chatSearchRequestDlgId;
+  bool get globalSearchRibbonVisible => _globalSearchRibbonVisible;
+  GlobalSearchScope get globalSearchScope => _globalSearchScope;
+  bool get globalSearchPreloading => _globalSearchPreloading;
+  String? get globalSearchPreloadLabel {
+    if (!_globalSearchPreloading) return null;
+    if (_globalSearchPreloadTotal <= 0) return 'Загрузка истории…';
+    return 'Загрузка истории $_globalSearchPreloadDone/$_globalSearchPreloadTotal…';
+  }
+  String? get openMessageRequestDlgId => _openMessageRequestDlgId;
+  String? get openMessageRequestId => _openMessageRequestId;
+  String? get activeGlobalSearchHitKey => _activeGlobalSearchHitKey;
   bool get isLoading => _connectionStatus == ConnectionStatus.connecting;
   bool get messagesLoading => _messagesLoading;
   bool get messagesLoadingOlder => _messagesLoadingOlder;
+
+  /// Режим мультивыбора чатов (кнопка-список в шапке, как leftBar iOS).
+  bool _dialogsSelectMode = false;
+  final Set<String> _selectedDialogIds = {};
+
+  bool get dialogsSelectMode => _dialogsSelectMode;
+  Set<String> get selectedDialogIds => Set.unmodifiable(_selectedDialogIds);
+  int get selectedDialogsCount => _selectedDialogIds.length;
+
+  void toggleDialogsSelectMode() {
+    if (_dialogsSelectMode) {
+      _dialogsSelectMode = false;
+      _selectedDialogIds.clear();
+    } else {
+      _dialogsSelectMode = true;
+      _selectedDialogIds.clear();
+    }
+    notifyListeners();
+  }
+
+  void exitDialogsSelectMode() {
+    if (!_dialogsSelectMode && _selectedDialogIds.isEmpty) return;
+    _dialogsSelectMode = false;
+    _selectedDialogIds.clear();
+    notifyListeners();
+  }
+
+  bool isDialogChecked(String? dlgId) {
+    if (dlgId == null || dlgId.trim().isEmpty) return false;
+    if (_selectedDialogIds.contains(dlgId.trim())) return true;
+    return _selectedDialogIds.any((id) => _sameDlgId(id, dlgId));
+  }
+
+  void toggleDialogChecked(String? dlgId) {
+    if (!_dialogsSelectMode) return;
+    final key = dlgId?.trim();
+    if (key == null || key.isEmpty) return;
+    String? existing;
+    for (final id in _selectedDialogIds) {
+      if (_sameDlgId(id, key)) {
+        existing = id;
+        break;
+      }
+    }
+    if (existing != null) {
+      _selectedDialogIds.remove(existing);
+    } else {
+      _selectedDialogIds.add(key);
+    }
+    notifyListeners();
+  }
+
+  /// Как iOS: без выбора — прочитать все; с выбором — только отмеченные.
+  void markDialogsReadFromSelectMode() {
+    final targets = _selectedDialogIds.isEmpty
+        ? _dialogs
+        : _dialogs.where((d) => isDialogChecked(d.id)).toList();
+    for (final dialog in targets) {
+      final id = dialog.id?.trim();
+      if (id == null || id.isEmpty) continue;
+      if (dialog.unread > 0) dialog.unread = 0;
+      _sendReadStatus(dialog, id);
+    }
+    notifyListeners();
+  }
+
+  /// Удаление выбранных чатов из локального списка (как UI iOS; серверный dlg_del пока нет).
+  void deleteSelectedDialogsFromSelectMode() {
+    if (_selectedDialogIds.isEmpty) return;
+    final toRemove = _dialogs.where((d) => isDialogChecked(d.id)).toList();
+    final wasSelectedOpen =
+        _selectedId != null && isDialogChecked(_selectedId);
+    for (final dialog in toRemove) {
+      final id = dialog.id?.trim();
+      if (id == null || id.isEmpty) continue;
+      dialog.messages.clear();
+      _messagesLoadedFor.removeWhere((x) => _sameDlgId(x, id));
+      _flushChatScroll(id);
+      _chatScrollSavers.removeWhere((k, _) => _sameDlgId(k, id));
+    }
+    _dialogs.removeWhere((d) => isDialogChecked(d.id));
+    if (wasSelectedOpen) {
+      _selectedId = null;
+    }
+    _selectedDialogIds.clear();
+    _dialogsSelectMode = false;
+    notifyListeners();
+  }
+
+  /// Первая страница истории (до ~100) уже получена для диалога в этой сессии.
+  bool isDialogHistoryReady(String? dlgId) {
+    if (dlgId == null || dlgId.trim().isEmpty) return false;
+    return _messagesLoadedFor.any((id) => _sameDlgId(id, dlgId));
+  }
+
+  bool isDialogHistoryLoading(String? dlgId) {
+    if (dlgId == null || dlgId.trim().isEmpty) return false;
+    if (isDialogHistoryReady(dlgId)) return false;
+    if (_messageLoadsInFlight.keys.any((id) => _sameDlgId(id, dlgId))) {
+      return true;
+    }
+    return _messagesLoading && _sameDlgId(_selectedId, dlgId);
+  }
   String? get messagesError => _messagesError;
 
   MessageViewModel? _replyToMessage;
@@ -237,6 +369,28 @@ class AppState extends ChangeNotifier {
 
   bool hasMoreMessages(String? dlgId) =>
       dlgId != null && (_msgHasMore[dlgId] ?? false);
+
+  /// При открытии чата оставляем только последнюю страницу (~100).
+  /// Более старые подгружаются при скролле вверх.
+  bool trimDialogToLatestPage(String? dlgId) {
+    final key = dlgId?.trim();
+    if (key == null || key.isEmpty) return false;
+    final dialog = _dialogs.where((d) => _sameDlgId(d.id, key)).firstOrNull;
+    if (dialog == null) return false;
+
+    const page = MsgListResult.historyPageSize;
+    if (dialog.messages.length <= page) return false;
+
+    dialog.messages = List<MessageViewModel>.of(
+      dialog.messages.sublist(dialog.messages.length - page),
+    );
+    MessageMapper.applyGrouping(
+      dialog.messages,
+      isGroupChat: dialog.isGrp,
+    );
+    _msgHasMore[key] = true;
+    return true;
+  }
 
   ChatScrollAnchor? chatScrollAnchor(String? dlgId) {
     if (dlgId == null) return null;
@@ -766,12 +920,20 @@ class AppState extends ChangeNotifier {
         isGroupChat: dialog.isGrp,
       );
       if (result.messages.isEmpty) return;
-      dialog.messages = _withoutDeletedMessages(dlgId, result.messages);
+      var messages = _withoutDeletedMessages(dlgId, result.messages);
+      // В кэше могла скопиться вся история — для UI берём только хвост.
+      const page = MsgListResult.historyPageSize;
+      if (messages.length > page) {
+        messages = messages.sublist(messages.length - page);
+        _msgHasMore[dlgId] = true;
+      } else {
+        _msgHasMore[dlgId] = result.hasMoreHistory;
+      }
+      dialog.messages = messages;
       MessageMapper.applyGrouping(
         dialog.messages,
         isGroupChat: dialog.isGrp,
       );
-      _msgHasMore[dlgId] = result.hasMoreHistory;
     } catch (_) {}
   }
 
@@ -841,11 +1003,11 @@ class AppState extends ChangeNotifier {
   }
 
   void _ensureDefaultSelection() {
-    if (_selectedId == null && _dialogs.isNotEmpty) {
-      _selectedId = _dialogs.first.id;
-    } else if (_selectedId != null &&
-        !_dialogs.any((d) => d.id == _selectedId)) {
-      _selectedId = _dialogs.isNotEmpty ? _dialogs.first.id : null;
+    // При старте чат не выбираем — пустая панель «Выберите, кому…».
+    if (_selectedId == null) return;
+    final stillExists = _dialogs.any((d) => _sameDlgId(d.id, _selectedId));
+    if (!stillExists) {
+      _selectedId = null;
     }
   }
 
@@ -1015,12 +1177,281 @@ class AppState extends ChangeNotifier {
 
   void selectTab(String tabId) {
     _activeTab = tabId;
+    closeGlobalSearchRibbon();
     notifyListeners();
   }
 
   void setSearch(String value) {
     _search = value;
+    if (_shouldPreloadGlobalSearch()) {
+      _scheduleGlobalSearchPreload();
+    } else {
+      _cancelGlobalSearchPreload();
+    }
     notifyListeners();
+  }
+
+  void openGlobalSearchRibbon() {
+    if (_globalSearchRibbonVisible) return;
+    _globalSearchRibbonVisible = true;
+    _scheduleGlobalSearchPreload();
+    notifyListeners();
+  }
+
+  void closeGlobalSearchRibbon() {
+    if (!_globalSearchRibbonVisible && _activeGlobalSearchHitKey == null) {
+      return;
+    }
+    _cancelGlobalSearchPreload();
+    _globalSearchRibbonVisible = false;
+    _activeGlobalSearchHitKey = null;
+    notifyListeners();
+  }
+
+  void setGlobalSearchScope(GlobalSearchScope scope) {
+    if (_globalSearchScope == scope) return;
+    _globalSearchScope = scope;
+    if (_shouldPreloadGlobalSearch()) {
+      _scheduleGlobalSearchPreload();
+    } else {
+      _cancelGlobalSearchPreload();
+    }
+    notifyListeners();
+  }
+
+  bool _shouldPreloadGlobalSearch() {
+    return _globalSearchRibbonVisible &&
+        _globalSearchScope != GlobalSearchScope.chats &&
+        _search.trim().isNotEmpty &&
+        _connectionStatus == ConnectionStatus.connected;
+  }
+
+  void _scheduleGlobalSearchPreload() {
+    _globalSearchPreloadDebounce?.cancel();
+    if (!_shouldPreloadGlobalSearch()) return;
+    _globalSearchPreloadDebounce = Timer(const Duration(milliseconds: 350), () {
+      unawaited(_runGlobalSearchPreload());
+    });
+  }
+
+  void _cancelGlobalSearchPreload() {
+    _globalSearchPreloadDebounce?.cancel();
+    _globalSearchPreloadDebounce = null;
+    _globalSearchPreloadToken++;
+    if (_globalSearchPreloading) {
+      _globalSearchPreloading = false;
+      _globalSearchPreloadDone = 0;
+      _globalSearchPreloadTotal = 0;
+    }
+  }
+
+  Future<void> _runGlobalSearchPreload() async {
+    if (!_shouldPreloadGlobalSearch()) return;
+
+    final token = ++_globalSearchPreloadToken;
+    _globalSearchPreloading = true;
+    _globalSearchPreloadDone = 0;
+
+    final dialogs = _dialogsForActiveTab()
+        .where((d) {
+          final id = d.id?.trim() ?? '';
+          return id.isNotEmpty &&
+              !DialogsListViewModel.isPlaceholderDlgId(id);
+        })
+        .toList();
+    _globalSearchPreloadTotal = dialogs.length;
+    notifyListeners();
+
+    try {
+      for (final dialog in dialogs) {
+        if (token != _globalSearchPreloadToken || !_shouldPreloadGlobalSearch()) {
+          return;
+        }
+        final dlgId = dialog.id!.trim();
+        await _ensureDialogHistoryForSearch(dlgId, dialog, token);
+        if (token != _globalSearchPreloadToken) return;
+        _globalSearchPreloadDone++;
+        notifyListeners();
+      }
+    } finally {
+      if (token == _globalSearchPreloadToken) {
+        _globalSearchPreloading = false;
+        _globalSearchPreloadDone = 0;
+        _globalSearchPreloadTotal = 0;
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> _ensureDialogHistoryForSearch(
+    String dlgId,
+    DialogsListViewModel dialog,
+    int token,
+  ) async {
+    if (token != _globalSearchPreloadToken) return;
+
+    await _ensureDeletedMessageIdsLoaded(dlgId);
+    if (dialog.messages.isEmpty) {
+      await _restoreMessagesFromCache(dlgId);
+    }
+    if (token != _globalSearchPreloadToken) return;
+
+    if (dialog.messages.isEmpty) {
+      await _loadMessagesForSearch(dlgId, dialog, token);
+    } else if (!_messagesLoadedFor.contains(dlgId)) {
+      _messagesLoadedFor.add(dlgId);
+    }
+    if (token != _globalSearchPreloadToken) return;
+
+    while ((_msgHasMore[dlgId] ?? false) && token == _globalSearchPreloadToken) {
+      await _loadOlderMessagesPage(dlgId, dialog);
+      if (token != _globalSearchPreloadToken) return;
+    }
+  }
+
+  Future<void> _loadMessagesForSearch(
+    String dlgId,
+    DialogsListViewModel dialog,
+    int token,
+  ) async {
+    if (_messagesLoadedFor.contains(dlgId)) return;
+
+    final existing = _messageLoadsInFlight[dlgId];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+
+    final future = _loadMessagesForSearchImpl(dlgId, dialog, token);
+    _messageLoadsInFlight[dlgId] = future;
+    try {
+      await future;
+    } finally {
+      _messageLoadsInFlight.remove(dlgId);
+    }
+  }
+
+  Future<void> _loadMessagesForSearchImpl(
+    String dlgId,
+    DialogsListViewModel dialog,
+    int token,
+  ) async {
+    if (_messagesLoadedFor.contains(dlgId)) return;
+    if (token != _globalSearchPreloadToken) return;
+
+    await _ensureDeletedMessageIdsLoaded(dlgId);
+    await _restoreMessagesFromCache(dlgId);
+    if (dialog.messages.isNotEmpty) {
+      _messagesLoadedFor.add(dlgId);
+      return;
+    }
+    if (token != _globalSearchPreloadToken) return;
+
+    try {
+      final result = await _api.fetchMessageList(
+        dlgId,
+        request: MsgListRequest.initial(),
+        currentUserId: _profile?.id,
+        currentUserName: _reactionAuthorName,
+        isGroupChat: dialog.isGrp,
+      );
+      if (token != _globalSearchPreloadToken) return;
+
+      final filtered = MsgListResult(
+        messages: _withoutDeletedMessages(dlgId, result.messages),
+        isHistory: result.isHistory,
+        responseFirstId: result.responseFirstId,
+        hasMoreHistory: result.hasMoreHistory,
+      );
+      MsgListMerge.apply(
+        dialog: dialog,
+        result: filtered,
+        onHistoryPagination: (hasMore) => _msgHasMore[dlgId] = hasMore,
+      );
+      _filterDeletedMessagesInDialog(dialog);
+      final deleted = _deletedMessageIds[dlgId];
+      if (deleted != null && deleted.isNotEmpty) {
+        unawaited(
+          ForumCache.instance.removeMessagesFromCache(dlgId, deleted),
+        );
+      }
+      _messagesLoadedFor.add(dlgId);
+    } catch (_) {}
+  }
+
+  List<GlobalSearchHit> get globalSearchHits {
+    return [
+      for (final g in globalSearchChatGroups) ...g.hits,
+    ];
+  }
+
+  /// Чаты с найденными медиа/файлами (как в Telegram).
+  List<GlobalSearchChatGroup> get globalSearchChatGroups {
+    if (!_globalSearchRibbonVisible || _search.trim().isEmpty) {
+      return const [];
+    }
+    if (_globalSearchScope == GlobalSearchScope.chats) return const [];
+    return GlobalSearch.searchMediaGrouped(
+      _dialogsForActiveTab(),
+      _search,
+      _globalSearchScope,
+    );
+  }
+
+  bool get showsGlobalMediaSearch =>
+      _globalSearchRibbonVisible &&
+      _globalSearchScope != GlobalSearchScope.chats &&
+      _search.trim().isNotEmpty;
+
+  /// Запрос открыть поиск в чате (например, из профиля собеседника).
+  void requestChatSearch(String dlgId) {
+    final id = dlgId.trim();
+    if (id.isEmpty) return;
+    _chatSearchRequestDlgId = id;
+    notifyListeners();
+  }
+
+  void clearChatSearchRequest({bool notify = true}) {
+    if (_chatSearchRequestDlgId == null) return;
+    _chatSearchRequestDlgId = null;
+    if (notify) notifyListeners();
+  }
+
+  void clearOpenMessageRequest({bool notify = true}) {
+    if (_openMessageRequestDlgId == null && _openMessageRequestId == null) {
+      return;
+    }
+    _openMessageRequestDlgId = null;
+    _openMessageRequestId = null;
+    if (notify) notifyListeners();
+  }
+
+  void requestOpenMessage({
+    required String dlgId,
+    required String messageId,
+  }) {
+    final id = dlgId.trim();
+    final msgId = messageId.trim();
+    if (id.isEmpty || msgId.isEmpty) return;
+    _openMessageRequestDlgId = id;
+    _openMessageRequestId = msgId;
+    notifyListeners();
+  }
+
+  Future<void> openGlobalSearchHit(GlobalSearchHit hit) async {
+    final dlgId = hit.dialogId;
+    if (dlgId.isEmpty) return;
+
+    // Ленту поиска не закрываем — как в Telegram остаётся окно результатов.
+    _activeGlobalSearchHitKey = hit.selectionKey;
+    _openMessageRequestDlgId = dlgId;
+    _openMessageRequestId = hit.messageRef.trim();
+
+    if (_sameDlgId(_selectedId, dlgId)) {
+      notifyListeners();
+      return;
+    }
+    await selectDialog(dlgId, closeGlobalSearch: false);
   }
 
   /// Вкладки: Все, ИИ, Личное + папки с сервера.
@@ -1194,7 +1625,7 @@ class AppState extends ChangeNotifier {
   /// Все диалоги без фильтров вкладки/поиска (для окна пересылки).
   List<DialogsListViewModel> get allDialogs => List.unmodifiable(_dialogs);
 
-  List<DialogsListViewModel> get dialogs {
+  Iterable<DialogsListViewModel> _dialogsForActiveTab() {
     Iterable<DialogsListViewModel> list = _dialogs;
 
     if (_activeTab == BuiltinTab.ai) {
@@ -1214,15 +1645,28 @@ class AppState extends ChangeNotifier {
         }
       }
     }
+    return list;
+  }
 
-    if (_search.trim().isNotEmpty) {
+  List<DialogsListViewModel> get dialogs {
+    var list = _dialogsForActiveTab().toList();
+
+    if (_globalSearchRibbonVisible &&
+        _globalSearchScope == GlobalSearchScope.chats &&
+        _search.trim().isNotEmpty) {
+      list = GlobalSearch.filterChats(list, _search);
+    } else if (_search.trim().isNotEmpty && !_globalSearchRibbonVisible) {
       final q = _search.toLowerCase();
-      list = list.where((d) =>
-          d.chatName.toLowerCase().contains(q) ||
-          d.last_msg.toLowerCase().contains(q));
+      list = list
+          .where(
+            (d) =>
+                d.chatName.toLowerCase().contains(q) ||
+                d.last_msg.toLowerCase().contains(q),
+          )
+          .toList();
     }
 
-    return list.toList()
+    return list
       ..sort((a, b) {
         if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
         return 0;
@@ -1350,7 +1794,12 @@ class AppState extends ChangeNotifier {
     if (dlgId.isNotEmpty) payload['dlg_id'] = dlgId;
   }
 
-  Future<void> selectDialog(String? id) async {
+  Future<void> selectDialog(
+    String? id, {
+    bool closeGlobalSearch = true,
+  }) async {
+    if (closeGlobalSearch) closeGlobalSearchRibbon();
+
     if (_selectedId == id) return;
     if (_selectedId != null &&
         id != null &&
@@ -1387,7 +1836,11 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    await preloadChatScrollAnchor(id);
+    // Хвост только при первом открытии в сессии. Повторный вход в тот же чат
+    // не обрезает уже подгруженную историю — иначе сбивается позиция скролла.
+    if (!_messagesLoadedFor.any((loaded) => _sameDlgId(loaded, id))) {
+      trimDialogToLatestPage(id);
+    }
     notifyListeners();
 
     if (_connectionStatus == ConnectionStatus.connected) {
@@ -1395,6 +1848,8 @@ class AppState extends ChangeNotifier {
       unawaited(_restoreTypingDraft(id));
     } else {
       await _restoreMessagesFromCache(id);
+      trimDialogToLatestPage(id);
+      _messagesLoadedFor.add(id.trim());
       if (_sameDlgId(_selectedId, id)) notifyListeners();
     }
 
@@ -1441,8 +1896,10 @@ class AppState extends ChangeNotifier {
 
     final hasLocalMessages = dialog != null && dialog.messages.isNotEmpty;
 
+    // Ждём ответ msg_list (хвост ~100), даже если в кэше уже что-то есть —
+    // UI не показывает ленту до готовности первой страницы.
     if (!sessionCached || force) {
-      _messagesLoading = !hasLocalMessages;
+      _messagesLoading = true;
       _messagesError = null;
       notifyListeners();
     }
@@ -1479,6 +1936,8 @@ class AppState extends ChangeNotifier {
             ForumCache.instance.removeMessagesFromCache(dlgId, deleted),
           );
         }
+        // После merge оставляем только хвост первой страницы.
+        trimDialogToLatestPage(dlgId);
         _messagesLoadedFor.add(dlgId);
         _messagesError = null;
         if (!result.isHistory && _sameDlgId(_selectedId, dlgId)) {
@@ -1487,11 +1946,24 @@ class AppState extends ChangeNotifier {
       }
     } on ForumApiException catch (e) {
       if (gen == _loadGeneration && _selectedId == dlgId) {
-        if (!hasLocalMessages) _messagesError = e.message;
+        if (!hasLocalMessages) {
+          _messagesError = e.message;
+          _messagesLoadedFor.add(dlgId);
+        } else {
+          // Сеть недоступна — показываем кэш.
+          trimDialogToLatestPage(dlgId);
+          _messagesLoadedFor.add(dlgId);
+        }
       }
     } catch (e) {
       if (gen == _loadGeneration && _selectedId == dlgId) {
-        if (!hasLocalMessages) _messagesError = e.toString();
+        if (!hasLocalMessages) {
+          _messagesError = e.toString();
+          _messagesLoadedFor.add(dlgId);
+        } else {
+          trimDialogToLatestPage(dlgId);
+          _messagesLoadedFor.add(dlgId);
+        }
       }
     } finally {
       if (gen == _loadGeneration && _selectedId == dlgId) {
@@ -1523,49 +1995,11 @@ class AppState extends ChangeNotifier {
     final dialog = _dialogs.where((d) => d.id == dlgId).firstOrNull;
     if (dialog == null) return;
 
-    final oldest = MsgListCursors.firstSaved(dialog.messages);
-    if (oldest == null) {
-      _msgHasMore[dlgId] = false;
-      return;
-    }
-
     _messagesLoadingOlder = true;
     notifyListeners();
 
     try {
-      final result = await _api.fetchMessageList(
-        dlgId,
-        request: MsgListRequest.history(oldest.id),
-        currentUserId: _profile?.id,
-        currentUserName: _reactionAuthorName,
-        isGroupChat: dialog.isGrp,
-      );
-
-      if (_selectedId != dlgId) return;
-
-      if (result.messages.isEmpty) {
-        _msgHasMore[dlgId] = false;
-        return;
-      }
-
-      final filtered = MsgListResult(
-        messages: _withoutDeletedMessages(dlgId, result.messages),
-        isHistory: result.isHistory,
-        responseFirstId: result.responseFirstId,
-        hasMoreHistory: result.hasMoreHistory,
-      );
-      MsgListMerge.apply(
-        dialog: dialog,
-        result: filtered,
-        onHistoryPagination: (hasMore) => _msgHasMore[dlgId] = hasMore,
-      );
-      _filterDeletedMessagesInDialog(dialog);
-      final deleted = _deletedMessageIds[dlgId];
-      if (deleted != null && deleted.isNotEmpty) {
-        unawaited(
-          ForumCache.instance.removeMessagesFromCache(dlgId, deleted),
-        );
-      }
+      await _loadOlderMessagesPage(dlgId, dialog);
     } on ForumApiException catch (e) {
       if (_selectedId == dlgId) _messagesError = e.message;
     } catch (e) {
@@ -1573,6 +2007,70 @@ class AppState extends ChangeNotifier {
     } finally {
       _messagesLoadingOlder = false;
       notifyListeners();
+    }
+  }
+
+  Future<void> _loadOlderMessagesPage(
+    String dlgId,
+    DialogsListViewModel dialog,
+  ) async {
+    final existing = _olderMessageLoadsInFlight[dlgId];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+
+    final future = _loadOlderMessagesPageImpl(dlgId, dialog);
+    _olderMessageLoadsInFlight[dlgId] = future;
+    try {
+      await future;
+    } finally {
+      _olderMessageLoadsInFlight.remove(dlgId);
+    }
+  }
+
+  Future<void> _loadOlderMessagesPageImpl(
+    String dlgId,
+    DialogsListViewModel dialog,
+  ) async {
+    if (!(_msgHasMore[dlgId] ?? false)) return;
+
+    final oldest = MsgListCursors.firstSaved(dialog.messages);
+    if (oldest == null) {
+      _msgHasMore[dlgId] = false;
+      return;
+    }
+
+    final result = await _api.fetchMessageList(
+      dlgId,
+      request: MsgListRequest.history(oldest.id),
+      currentUserId: _profile?.id,
+      currentUserName: _reactionAuthorName,
+      isGroupChat: dialog.isGrp,
+    );
+
+    if (result.messages.isEmpty) {
+      _msgHasMore[dlgId] = false;
+      return;
+    }
+
+    final filtered = MsgListResult(
+      messages: _withoutDeletedMessages(dlgId, result.messages),
+      isHistory: result.isHistory,
+      responseFirstId: result.responseFirstId,
+      hasMoreHistory: result.hasMoreHistory,
+    );
+    MsgListMerge.apply(
+      dialog: dialog,
+      result: filtered,
+      onHistoryPagination: (hasMore) => _msgHasMore[dlgId] = hasMore,
+    );
+    _filterDeletedMessagesInDialog(dialog);
+    final deleted = _deletedMessageIds[dlgId];
+    if (deleted != null && deleted.isNotEmpty) {
+      unawaited(
+        ForumCache.instance.removeMessagesFromCache(dlgId, deleted),
+      );
     }
   }
 
@@ -3109,8 +3607,7 @@ class AppState extends ChangeNotifier {
     final nowIso = _nowIso();
     final last = dialog.messages.isNotEmpty ? dialog.messages.last : null;
     final sameAuthorAsPrev = last?.my == true;
-    final firstTitle =
-        batch.first.fname.isNotEmpty ? batch.first.fname : 'Файл';
+    final firstTitle = MediaDisplayName.forFile(batch.first, dttmcr: nowIso);
     final preview = batch.length > 1
         ? 'Файлы (${batch.length})'
         : firstTitle;
@@ -3145,7 +3642,7 @@ class AppState extends ChangeNotifier {
       final updatedFiles = <MediaFile>[];
 
       for (final file in batch) {
-        final title = file.fname.isNotEmpty ? file.fname : 'Файл';
+        final title = MediaDisplayName.forFile(file, dttmcr: nowIso);
         final bytes = await _readAttachmentBytes(file);
         if (bytes == null || bytes.isEmpty) {
           throw StateError('Не удалось прочитать файл $title');
@@ -3348,7 +3845,7 @@ class AppState extends ChangeNotifier {
         continue;
       }
 
-      final title = file.fname.isNotEmpty ? file.fname : 'Файл';
+      final title = MediaDisplayName.forFile(file, dttmcr: message.dttmcr);
       final bytes = await _readAttachmentBytes(file);
       if (bytes == null || bytes.isEmpty) {
         throw StateError('Не удалось прочитать файл $title');

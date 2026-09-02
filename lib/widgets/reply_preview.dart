@@ -55,6 +55,14 @@ class ReplyPreview extends StatelessWidget {
         ? Colors.white.withValues(alpha: 0.70)
         : p.text2;
 
+    final textMaxWidth = maxWidth != null
+        ? (maxWidth! -
+            _stripeWidth -
+            (_isRepost && message.replyShowsMediaThumb ? _thumbSize + 8 : 0) -
+            (!_isRepost && message.replyShowsMediaThumb ? _thumbSize + 8 : 0) -
+            16)
+        : 220.0;
+
     final bar = Container(
       height: _height,
       margin: const EdgeInsets.only(bottom: 6),
@@ -93,8 +101,8 @@ class ReplyPreview extends StatelessWidget {
               ),
             ),
           ],
-          Flexible(
-            fit: FlexFit.loose,
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: textMaxWidth),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Column(

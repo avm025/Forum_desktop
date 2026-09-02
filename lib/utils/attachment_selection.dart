@@ -10,6 +10,7 @@ class AttachmentSelection {
 
   static final ValueNotifier<int> clearToken = ValueNotifier<int>(0);
   static bool _retainPointer = false;
+  static bool _suppressBubbleTap = false;
   static bool _keyboardBound = false;
 
   static void ensureKeyboardBound() {
@@ -29,6 +30,16 @@ class AttachmentSelection {
   /// Pointer down по вложениям — не сбрасывать через clearIfOutside.
   static void retainPointer() => _retainPointer = true;
 
+  /// Тап обработан сеткой медиа — пузырь не должен открывать/закрывать меню.
+  static void suppressNextBubbleTap() => _suppressBubbleTap = true;
+
+  /// Сбросить флаг; `true` если тап нужно проигнорировать в пузыре.
+  static bool takeSuppressBubbleTap() {
+    if (!_suppressBubbleTap) return false;
+    _suppressBubbleTap = false;
+    return true;
+  }
+
   /// Сделать [owner] единственным владельцем выделения (остальные сбрасывают).
   static void claim(Object owner) {
     if (identical(activeOwner.value, owner)) return;
@@ -37,6 +48,7 @@ class AttachmentSelection {
 
   static void clear() {
     _retainPointer = false;
+    _suppressBubbleTap = false;
     activeOwner.value = null;
     clearToken.value++;
   }

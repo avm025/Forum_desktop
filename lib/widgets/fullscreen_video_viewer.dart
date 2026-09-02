@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/media_file.dart';
+import '../utils/media_display_name.dart';
 import '../utils/media_file_loader.dart';
 
 /// Воспроизведение видео из чата.
@@ -76,9 +77,7 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
 
   @override
   Widget build(BuildContext context) {
-    final title = widget.file.fname.isNotEmpty
-        ? widget.file.fname
-        : 'Видео';
+    final title = MediaDisplayName.forFile(widget.file);
 
     return Dialog(
       backgroundColor: Colors.black87,

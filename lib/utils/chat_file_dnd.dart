@@ -8,6 +8,7 @@ import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 
 import '../models/media_file.dart';
 import 'file_kind.dart';
+import 'media_display_name.dart';
 import 'media_file_loader.dart';
 import 'media_file_url.dart';
 import 'media_message_layout.dart';
@@ -233,9 +234,7 @@ class ChatFileDnd {
   }
 
   static String _displayName(MediaFile file) {
-    if (file.title.trim().isNotEmpty) return file.title.trim();
-    if (file.fname.trim().isNotEmpty) return file.fname.trim();
-    return 'file';
+    return MediaDisplayName.forFile(file);
   }
 
   static Future<String> _writeTemp(String name, Uint8List bytes) async {
