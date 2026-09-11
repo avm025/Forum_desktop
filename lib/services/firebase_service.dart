@@ -25,6 +25,9 @@ class FirebaseService {
     _apiClient = client;
   }
 
+  /// Любой data-push не про звонок (новое сообщение / группа и т.п.).
+  VoidCallback? onChatRelatedPush;
+
   Future<void> initialize() async {
     if (kIsWeb || !Platform.isMacOS) return;
 
@@ -70,7 +73,11 @@ class FirebaseService {
         data.containsKey('call_id') ||
         data['voip'] == true ||
         data['voip'] == '1';
-    if (!looksLikeCall) return;
-    CallManager.instance.handlePushPayload(data);
+    if (looksLikeCall) {
+      CallManager.instance.handlePushPayload(data);
+      return;
+    }
+    // Новое сообщение / добавление в группу и т.п. — обновить dlg_list.
+    onChatRelatedPush?.call();
   }
 }

@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../utils/attachment_selection.dart';
 import 'avatar_widget.dart';
+import 'dialog_context_menu.dart';
 import 'dialog_drop_target.dart';
 import 'dialog_tile.dart';
 import 'filter_tabs.dart';
@@ -672,6 +673,13 @@ class _DialogsScrollListState extends State<_DialogsScrollList> {
           selectMode: widget.selectMode,
           checked: widget.selectMode && app.isDialogChecked(d.id),
           onTap: () => widget.onSelect(d.id),
+          onContextMenu: widget.selectMode
+              ? null
+              : (pos) => DialogContextMenu.show(
+                    context: context,
+                    globalPosition: pos,
+                    dialog: d,
+                  ),
         );
         if (id.isEmpty || widget.selectMode) return tile;
         return DialogDropTarget(

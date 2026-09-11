@@ -451,9 +451,26 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
       },
     );
     if (ok == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$action — скоро')),
-      );
+      final dlgId = dialog.id?.trim() ?? '';
+      try {
+        if (action == 'Покинуть группу' && dlgId.isNotEmpty) {
+          await context.read<AppState>().leaveGroup(dlgId);
+          if (mounted) Navigator.of(context).maybePop();
+        } else if (action == 'Удалить группу' && dlgId.isNotEmpty) {
+          await context.read<AppState>().deleteDialog(dlgId);
+          if (mounted) Navigator.of(context).maybePop();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('$action — скоро')),
+          );
+        }
+      } catch (e) {
+        if (!mounted) return;
+        final msg = e.toString().replaceFirst(RegExp(r'^[^:]+:\s*'), '');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg.isNotEmpty ? msg : 'Не удалось выполнить')),
+        );
+      }
     }
   }
 
@@ -529,7 +546,17 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
                             .read<AppState>()
                             .startCallFromChat(video: true),
                         onSearch: _openChatSearch,
-                        onMute: () => setState(() => _muted = !_muted),
+                        onMute: () {
+                          final next = !_muted;
+                          setState(() => _muted = next);
+                          final id = widget.dialogId.trim();
+                          if (id.isNotEmpty) {
+                            context.read<AppState>().setDialogMuted(
+                                  id,
+                                  muted: next,
+                                );
+                          }
+                        },
                         onLeave: () => _onMoreAction(dialog, 'Покинуть группу'),
                         onMore: () => _showMoreMenu(dialog),
                         onFavSearch: _openChatSearch,

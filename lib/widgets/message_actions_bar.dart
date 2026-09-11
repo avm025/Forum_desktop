@@ -28,13 +28,14 @@ class MsgReadViewsConfig {
   });
 }
 
-/// Пункт контекстного меню сообщения (как в Telegram Desktop).
+/// Пункт контекстного меню сообщения (как в Forum_ios MenuMessageController).
 class MessageContextAction {
   final String id;
   final String label;
   final IconData icon;
   final Color? color;
   final bool destructive;
+  final bool enabled;
 
   const MessageContextAction({
     required this.id,
@@ -42,6 +43,7 @@ class MessageContextAction {
     required this.icon,
     this.color,
     this.destructive = false,
+    this.enabled = true,
   });
 }
 
@@ -625,8 +627,10 @@ class _ActionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = action.color ??
-        (action.destructive ? Colors.redAccent : palette.text1);
+    final color = action.enabled
+        ? (action.color ??
+            (action.destructive ? Colors.redAccent : palette.text1))
+        : palette.text3;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -634,24 +638,27 @@ class _ActionTile extends StatelessWidget {
         if (showDividerBefore)
           Divider(height: 8, color: palette.border1.withValues(alpha: 0.55)),
         InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            child: Row(
-              children: [
-                Icon(action.icon, size: 20, color: color),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Text(
-                    action.label,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w400,
+          onTap: action.enabled ? onTap : null,
+          child: Opacity(
+            opacity: action.enabled ? 1 : 0.45,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(action.icon, size: 20, color: color),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      action.label,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w400,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -839,10 +846,14 @@ Future<void> showMessageActions({
   required BuildContext context,
   required GlobalKey anchorKey,
   required VoidCallback onReply,
-  VoidCallback? onCall,
   VoidCallback? onForward,
+  VoidCallback? onEdit,
   VoidCallback? onCopy,
-  VoidCallback? onOpen,
+  VoidCallback? onSaveAs,
+  VoidCallback? onFavorite,
+  VoidCallback? onSelect,
+  VoidCallback? onPin,
+  bool isPinned = false,
   VoidCallback? onDelete,
   MsgReadViewsConfig? readViews,
   void Function(List<MsgReadEntry> entries)? onViews,
@@ -852,13 +863,8 @@ Future<void> showMessageActions({
 }) async {
   List<MsgReadEntry> loadedViews = const [];
 
+  // Порядок как Forum_ios MenuMessageController (обычный чат) + «Сохранить как…».
   final actions = <MessageContextAction>[
-    if (onCall != null)
-      const MessageContextAction(
-        id: 'call',
-        label: 'Позвонить',
-        icon: Icons.phone_rounded,
-      ),
     const MessageContextAction(
       id: 'reply',
       label: 'Ответить',
@@ -870,17 +876,41 @@ Future<void> showMessageActions({
         label: 'Переслать',
         icon: Icons.forward_rounded,
       ),
+    if (onEdit != null)
+      const MessageContextAction(
+        id: 'edit',
+        label: 'Редактировать',
+        icon: Icons.edit_rounded,
+      ),
     if (onCopy != null)
       const MessageContextAction(
         id: 'copy',
-        label: 'Копировать',
+        label: 'Скопировать',
         icon: Icons.copy_rounded,
       ),
-    if (onOpen != null)
+    if (onSaveAs != null)
       const MessageContextAction(
-        id: 'open',
-        label: 'Открыть',
-        icon: Icons.open_in_new_rounded,
+        id: 'save_as',
+        label: 'Сохранить как...',
+        icon: Icons.save_alt_rounded,
+      ),
+    if (onFavorite != null)
+      const MessageContextAction(
+        id: 'favorite',
+        label: 'В избранное',
+        icon: Icons.bookmark_border_rounded,
+      ),
+    MessageContextAction(
+      id: 'select',
+      label: 'Выбрать',
+      icon: Icons.checklist_rounded,
+      enabled: onSelect != null,
+    ),
+    if (onPin != null)
+      MessageContextAction(
+        id: 'pin',
+        label: isPinned ? 'Открепить' : 'Закрепить',
+        icon: isPinned ? Icons.push_pin : Icons.push_pin_outlined,
       ),
     if (onDelete != null)
       const MessageContextAction(
@@ -913,16 +943,22 @@ Future<void> showMessageActions({
   switch (selected) {
     case 'views':
       onViews?.call(loadedViews);
-    case 'call':
-      onCall?.call();
     case 'reply':
       onReply();
     case 'forward':
       onForward?.call();
+    case 'edit':
+      onEdit?.call();
     case 'copy':
       onCopy?.call();
-    case 'open':
-      onOpen?.call();
+    case 'save_as':
+      onSaveAs?.call();
+    case 'favorite':
+      onFavorite?.call();
+    case 'select':
+      onSelect?.call();
+    case 'pin':
+      onPin?.call();
     case 'delete':
       onDelete?.call();
   }

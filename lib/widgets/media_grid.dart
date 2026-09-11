@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 
 import '../models/media_file.dart';
 import '../services/media_thumb_cache.dart';
-import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../utils/attachment_selection.dart';
 import '../utils/media_message_layout.dart';
@@ -15,8 +14,8 @@ import 'media_thumb_tile.dart';
 
 /// Медиа в сообщении: ряды без пустот, границы между файлами.
 ///
-/// Один файл: ЛКМ — открыть, ПКМ — меню.
-/// Группа: ЛКМ — выделить/снять; протянуть — рамка; двойной ЛКМ — открыть;
+/// Короткий ЛКМ — открыть; сдвиг — DnD без открытия (одиночные сразу).
+/// Группа: короткий ЛКМ — открыть; long-press — выделить; рамка — группа;
 /// ПКМ — меню.
 class MediaGrid extends StatefulWidget {
   final List<MediaFile> files;
@@ -54,12 +53,14 @@ class _MediaGridState extends State<MediaGrid> {
   Offset? _marqueeOrigin;
   Offset? _marqueeCurrent;
   bool _marqueeActive = false;
-  int? _tapIndex;
-  DateTime? _lastTapAt;
-  Timer? _deselectTimer;
-  String? _pendingDeselectId;
+  /// Long-press / сдвиг — DnD без открытия.
+  bool _dragArmed = false;
+  bool _suppressOpen = false;
+  int? _downHitIndex;
+  Timer? _longPressTimer;
 
-  static const _doubleTapWindow = Duration(milliseconds: 200);
+  static const _longPressDuration = Duration(milliseconds: 350);
+  static const _dragSlop = 10.0;
 
   @override
   void initState() {
@@ -71,35 +72,13 @@ class _MediaGridState extends State<MediaGrid> {
 
   @override
   void dispose() {
-    _deselectTimer?.cancel();
+    _longPressTimer?.cancel();
     AttachmentSelection.clearToken.removeListener(_onGlobalClear);
     AttachmentSelection.activeOwner.removeListener(_onOwnerChanged);
     if (identical(AttachmentSelection.activeOwner.value, _owner)) {
       AttachmentSelection.activeOwner.value = null;
     }
     super.dispose();
-  }
-
-  void _cancelPendingDeselect() {
-    _deselectTimer?.cancel();
-    _deselectTimer = null;
-    _pendingDeselectId = null;
-  }
-
-  void _scheduleDeselect(String id) {
-    _cancelPendingDeselect();
-    _pendingDeselectId = id;
-    _deselectTimer = Timer(_doubleTapWindow, () {
-      if (!mounted || _pendingDeselectId != id) return;
-      _pendingDeselectId = null;
-      _deselectTimer = null;
-      final next = Set<String>.from(_selected)..remove(id);
-      if (next.isEmpty) {
-        _clearLocal();
-      } else {
-        _applySelection(next);
-      }
-    });
   }
 
   void _onGlobalClear() {
@@ -116,7 +95,6 @@ class _MediaGridState extends State<MediaGrid> {
   }
 
   void _clearLocal({bool notify = true}) {
-    _cancelPendingDeselect();
     if (_selected.isEmpty) return;
     setState(() => _selected.clear());
     if (identical(AttachmentSelection.activeOwner.value, _owner)) {
@@ -133,6 +111,22 @@ class _MediaGridState extends State<MediaGrid> {
         ..addAll(next);
     });
     widget.onSelectionChanged?.call(_selectedFiles());
+  }
+
+  /// Группа: long-press добавляет к выделению; повторный — снимает.
+  void _toggleSelection(String id) {
+    final next = Set<String>.from(_selected);
+    if (next.contains(id)) {
+      next.remove(id);
+      if (next.isEmpty) {
+        _clearLocal();
+      } else {
+        _applySelection(next);
+      }
+      return;
+    }
+    next.add(id);
+    _applySelection(next);
   }
 
   List<MediaFile> _selectedFiles() {
@@ -194,43 +188,92 @@ class _MediaGridState extends State<MediaGrid> {
     _marqueeOrigin = local;
     _marqueeCurrent = local;
     _marqueeActive = false;
+    _dragArmed = false;
+    _suppressOpen = false;
+    _downHitIndex = _hitIndex(local, layout);
+    _longPressTimer?.cancel();
+    final hit = _downHitIndex;
+    if (hit != null) {
+      _longPressTimer = Timer(_longPressDuration, () {
+        if (!mounted || _marqueeOrigin == null) return;
+        _dragArmed = true;
+        _suppressOpen = true;
+        AttachmentSelection.suppressNextBubbleTap();
+        // Одиночные — без галки; группа — выделить под DnD.
+        if (_list.length > 1) {
+          _toggleSelection(_idAt(hit));
+        }
+      });
+    }
   }
 
   void _onPointerMove(PointerMoveEvent e, MediaMessageLayout layout) {
     if (e.buttons != kPrimaryButton) return;
     if (_marqueeOrigin == null) return;
-    if (_list.length <= 1) return;
 
     final local = _toLocal(e.position);
-    // Порог больше микродвижения клика, чтобы ЛКМ не превращался в рамку.
-    if (!_marqueeActive && (local - _marqueeOrigin!).distance < 10) return;
+    final distance = (local - _marqueeOrigin!).distance;
 
+    if (_list.length <= 1) {
+      // Одиночное медиа: сдвиг = DnD, не открытие (без выделения).
+      if (!_suppressOpen && distance >= _dragSlop) {
+        _longPressTimer?.cancel();
+        _suppressOpen = true;
+        _dragArmed = true;
+      }
+      return;
+    }
+
+    // Группа: протягивание — рамка выделения.
+    if (!_marqueeActive && distance < _dragSlop) return;
+
+    _longPressTimer?.cancel();
+    _suppressOpen = true;
+    _dragArmed = true;
     setState(() {
       _marqueeActive = true;
       _marqueeCurrent = local;
     });
-    _cancelPendingDeselect();
     _selectIntersecting(layout);
   }
 
   void _onPointerUp(PointerUpEvent e, MediaMessageLayout layout) {
-    final local = _toLocal(e.position);
-    final wasMarquee = _marqueeActive;
-    final origin = _marqueeOrigin;
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
 
-    if (wasMarquee) {
-      AttachmentSelection.suppressNextBubbleTap();
-      setState(() {
-        _marqueeActive = false;
-        _marqueeOrigin = null;
-        _marqueeCurrent = null;
-      });
+    // ПКМ / другие кнопки — только меню, не открытие.
+    if (_marqueeOrigin == null) {
+      _marqueeCurrent = null;
+      _marqueeActive = false;
+      _dragArmed = false;
+      _suppressOpen = false;
+      _downHitIndex = null;
       return;
     }
+
+    final local = _toLocal(e.position);
+    final wasMarquee = _marqueeActive;
+    final suppressOpen = _suppressOpen || _dragArmed;
+    final origin = _marqueeOrigin;
 
     _marqueeOrigin = null;
     _marqueeCurrent = null;
     _marqueeActive = false;
+    _dragArmed = false;
+    _suppressOpen = false;
+    _downHitIndex = null;
+
+    if (wasMarquee) {
+      AttachmentSelection.suppressNextBubbleTap();
+      setState(() {});
+      return;
+    }
+
+    if (suppressOpen) {
+      // Long-press / DnD — не открываем.
+      AttachmentSelection.suppressNextBubbleTap();
+      return;
+    }
 
     if (origin == null) return;
     final hit = _hitIndex(local, layout);
@@ -239,38 +282,10 @@ class _MediaGridState extends State<MediaGrid> {
       return;
     }
 
-    final id = _idAt(hit);
-    final isGroup = _list.length > 1;
-    final now = DateTime.now();
-    final doubleTap = _tapIndex == hit &&
-        _lastTapAt != null &&
-        now.difference(_lastTapAt!) < _doubleTapWindow;
-
-    _tapIndex = hit;
-    _lastTapAt = now;
-
     AttachmentSelection.suppressNextBubbleTap();
-
-    // Одно медиа — ЛКМ сразу открывает.
-    if (!isGroup) {
-      widget.onFileTap?.call(_list[hit]);
-      return;
-    }
-
-    // Группа: двойной ЛКМ — открыть, выделение визуально не трогаем.
-    if (doubleTap) {
-      _cancelPendingDeselect();
-      widget.onFileTap?.call(_list[hit]);
-      return;
-    }
-
-    // Группа: ЛКМ — выделить сразу; снять — с задержкой (ждём возможный dblclick).
-    if (_selected.contains(id)) {
-      _scheduleDeselect(id);
-      return;
-    }
-    _cancelPendingDeselect();
-    _applySelection({..._selected, id});
+    // Короткий ЛКМ — открыть (одиночные и группа); выделение — long-press.
+    _clearLocal();
+    widget.onFileTap?.call(_list[hit]);
   }
 
   void _onSecondaryTapUp(TapUpDetails details, MediaMessageLayout layout) {
@@ -281,10 +296,15 @@ class _MediaGridState extends State<MediaGrid> {
   }
 
   void _onPointerCancel() {
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
     setState(() {
       _marqueeActive = false;
       _marqueeOrigin = null;
       _marqueeCurrent = null;
+      _dragArmed = false;
+      _suppressOpen = false;
+      _downHitIndex = null;
     });
   }
 
@@ -307,9 +327,11 @@ class _MediaGridState extends State<MediaGrid> {
       files: list,
       selectedIds: Set<String>.from(_selected),
       canStartDrag: (id) {
-        // Во время рамки DnD не начинаем; с невыделенного — рамка, не drag.
+        // Во время рамки DnD не начинаем.
         if (_marqueeActive) return false;
+        // Одиночные — сразу; группа — после long-press / сдвига / выделения.
         if (list.length <= 1) return true;
+        if (!_dragArmed && !_selected.contains(id)) return false;
         return _selected.contains(id);
       },
       builder: (context, wrapFile) {
@@ -344,7 +366,8 @@ class _MediaGridState extends State<MediaGrid> {
                               width: layout.tiles[i].width,
                               height: layout.tiles[i].height,
                               playIconSize: layout.tiles[i].playIconSize,
-                              selected: _selected.contains(_idAt(i)),
+                              selected: list.length > 1 &&
+                                  _selected.contains(_idAt(i)),
                             ),
                           ),
                         ),
@@ -418,21 +441,10 @@ class _MediaGridState extends State<MediaGrid> {
         child: SizedBox(width: width, height: height),
       );
     } else {
-      final gradient = AppColors.avatarGradientFor(
-        file.hash.isNotEmpty ? file.hash : '${file.width}x${file.height}',
-      );
-      content = Container(
-        width: width,
-        height: height,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: gradient,
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        alignment: Alignment.center,
-        child: const Icon(Icons.image_outlined, color: Colors.white54, size: 40),
+      // Нет URL/байтов — нейтральный фон вместо градиента с иконкой.
+      content = ColoredBox(
+        color: context.palette.bg3,
+        child: SizedBox(width: width, height: height),
       );
     }
 

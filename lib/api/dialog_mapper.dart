@@ -7,6 +7,7 @@ import '../calls/call_message_display.dart';
 import '../models/chat_type.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/group_additional_info_model.dart';
+import '../utils/utf16.dart';
 
 /// Преобразование JSON диалога с сервера в [DialogsListViewModel].
 ///
@@ -19,7 +20,7 @@ class DialogMapper {
     Map<String, dynamic> json, {
     String? currentUserId,
   }) {
-    final isGrp = _parseInt(json['is_grp']) == 1;
+    final isGrp = _parseFlag(json['is_grp']);
     final dlgId =
         json['dlg_id']?.toString() ?? json['id']?.toString() ?? '';
     final usr1Id = json['usr1_id']?.toString() ?? '';
@@ -33,7 +34,9 @@ class DialogMapper {
     var phone = json['phone']?.toString();
     var colorHex = (json['color'] ?? '').toString().trim();
     var colAvaId = _parseInt(
-      json['col_ava_id'] ?? json['grp_col_ava_id'],
+      json['col_ava_id'] ??
+          json['dlg_col_ava_id'] ??
+          json['grp_col_ava_id'],
       fallback: 1,
     );
     if (colAvaId <= 0) colAvaId = 1;
@@ -94,21 +97,23 @@ class DialogMapper {
       id: dlgId,
       usr_id: usrId,
       ai: _parseInt(json['ai']),
-      // CDN fileServer (как GL.file_server), не API-хост :7770.
+      // CDN fileServer (как GL.file_server), не API-хост.
       avatar: ApiConfig.resolveAssetUrl(avatarPath),
       colAvaId: colAvaId,
       avatarColor: colorHex.isNotEmpty
           ? ['#${colorHex.replaceFirst('#', '')}']
           : null,
-      chatName: chatName,
-      last_msg: last.text,
+      chatName: sanitizeUtf16(chatName),
+      last_msg: sanitizeUtf16(last.text),
       last_msg_id: last.id,
       last_msg_fr_id: last.frId.isNotEmpty
           ? last.frId
           : (json['usr1_id']?.toString() ?? ''),
-      last_msg_fr_name: last.frName.isNotEmpty
-          ? last.frName
-          : (json['usr1_name']?.toString() ?? ''),
+      last_msg_fr_name: sanitizeUtf16(
+        last.frName.isNotEmpty
+            ? last.frName
+            : (json['usr1_name']?.toString() ?? ''),
+      ),
       last_msg_dttmcr: last.time.isNotEmpty
           ? last.time
           : _formatTime(json['dttmup']?.toString() ?? ''),
@@ -118,8 +123,8 @@ class DialogMapper {
       isGrp: isGrp,
       pin: _parseInt(json['pin']),
       phone: phone,
-      fav: _parseInt(json['fav']) == 1,
-      online: _parseInt(json['online']) == 1,
+      fav: _parseFlag(json['fav']),
+      online: _parseFlag(json['online']),
       groupAditionalInfo: GroupAditionalInfoModel(
         colAvalId: colAvaId,
         desc: json['about']?.toString(),
@@ -235,13 +240,20 @@ class DialogMapper {
             )?.previewText ??
             'Вызов';
       case 'geo':
+      case 'geotr':
         final geo = _asMap(bodyRaw);
         if (geo != null) {
+          final liveFlag = _parseLiveFlag(geo['live']);
+          if (t == 'geotr' && liveFlag == false) {
+            return 'Трансляция геопозиции завершена';
+          }
           final adrs =
               (geo['adrs'] ?? geo['address'])?.toString().trim() ?? '';
-          return adrs.isNotEmpty ? 'Геопозиция: $adrs' : 'Геопозиция';
+          if (adrs.isNotEmpty) return 'Геопозиция: $adrs';
+          final live = liveFlag ?? (t == 'geotr');
+          return live ? 'Трансляция геопозиции' : 'Геопозиция';
         }
-        return 'Геопозиция';
+        return t == 'geotr' ? 'Трансляция геопозиции' : 'Геопозиция';
       case 'file':
         final file = _asMap(bodyRaw);
         if (file != null) {
@@ -362,11 +374,32 @@ class DialogMapper {
         (t.contains('"desc"') && t.contains('"kind"'));
   }
 
+  static bool? _parseLiveFlag(dynamic v) {
+    if (v == null) return null;
+    if (v is bool) return v;
+    if (v is num) return v.toInt() == 1;
+    final s = v.toString().trim().toLowerCase();
+    if (s == 'true' || s == '1') return true;
+    if (s == 'false' || s == '0') return false;
+    return null;
+  }
+
   static int _parseInt(dynamic v, {int fallback = 0}) {
     if (v == null) return fallback;
     if (v is int) return v;
-    if (v is String) return int.tryParse(v) ?? fallback;
+    if (v is num) return v.toInt();
+    if (v is bool) return v ? 1 : 0;
+    if (v is String) return int.tryParse(v.trim()) ?? fallback;
     return fallback;
+  }
+
+  /// `is_grp` / `fav` / `online`: `1`, `"1"`, `true`.
+  static bool _parseFlag(dynamic v) {
+    if (v == true) return true;
+    if (v == false || v == null) return false;
+    if (v is num) return v != 0;
+    final s = v.toString().trim().toLowerCase();
+    return s == '1' || s == 'true';
   }
 
   static bool _sameUserId(String? a, String? b) {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/utf16.dart';
 
 /// Диалог ввода названия папки (макс. 24 символа).
 Future<String?> showFolderNameDialog(
@@ -11,7 +12,9 @@ Future<String?> showFolderNameDialog(
   String confirmLabel = 'Сохранить',
 }) {
   final p = context.palette;
-  final controller = TextEditingController(text: initialName ?? '');
+  final controller = TextEditingController(
+    text: sanitizeUtf16(initialName ?? ''),
+  );
 
   return showDialog<String>(
     context: context,
@@ -35,6 +38,7 @@ Future<String?> showFolderNameDialog(
           controller: controller,
           autofocus: true,
           maxLength: BuiltinTab.maxFolderNameLength,
+          inputFormatters: const [Utf16SanitizingFormatter()],
           style: TextStyle(color: p.text1, fontSize: 15),
           cursorColor: p.purple,
           decoration: InputDecoration(
@@ -49,7 +53,7 @@ Future<String?> showFolderNameDialog(
             ),
           ),
           onSubmitted: (v) {
-            final trimmed = v.trim();
+            final trimmed = sanitizeUtf16(v).trim();
             if (trimmed.isNotEmpty) {
               Navigator.of(dialogContext).pop(trimmed);
             }
@@ -62,7 +66,7 @@ Future<String?> showFolderNameDialog(
           ),
           TextButton(
             onPressed: () {
-              final trimmed = controller.text.trim();
+              final trimmed = sanitizeUtf16(controller.text).trim();
               if (trimmed.isEmpty) return;
               Navigator.of(dialogContext).pop(trimmed);
             },

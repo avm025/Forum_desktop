@@ -30,10 +30,11 @@ class FilterTabs extends StatelessWidget {
                 selected: state.activeTab == tab.id,
                 palette: p,
                 onTap: () => context.read<AppState>().selectTab(tab.id),
-                onLongPress: () => FolderActions.showTabMenu(
+                onContextMenu: (pos) => FolderActions.showTabMenu(
                   context,
                   tabId: tab.id,
                   label: tab.label,
+                  globalPosition: pos,
                 ),
               ),
             ),
@@ -49,7 +50,7 @@ class _Tab extends StatelessWidget {
   final bool selected;
   final ForumPalette palette;
   final VoidCallback onTap;
-  final VoidCallback onLongPress;
+  final ValueChanged<Offset> onContextMenu;
 
   const _Tab({
     required this.label,
@@ -57,7 +58,7 @@ class _Tab extends StatelessWidget {
     required this.selected,
     required this.palette,
     required this.onTap,
-    required this.onLongPress,
+    required this.onContextMenu,
   });
 
   @override
@@ -65,7 +66,7 @@ class _Tab extends StatelessWidget {
     final color = selected ? palette.lime : palette.text2;
     return GestureDetector(
       onTap: onTap,
-      onLongPress: onLongPress,
+      onSecondaryTapUp: (details) => onContextMenu(details.globalPosition),
       behavior: HitTestBehavior.opaque,
       child: Row(
         mainAxisSize: MainAxisSize.min,

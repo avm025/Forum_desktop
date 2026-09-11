@@ -9,218 +9,318 @@ import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/cached_forum_image.dart';
 import '../widgets/profile_avatar_editor.dart';
-import '../widgets/profile_content_frame.dart';
 import 'appearance_screen.dart';
 import 'profile/devices_menu_screen.dart';
 import 'profile/edit_profile_screen.dart';
 import 'profile/profile_placeholder_screen.dart';
 import 'profile/qr_authorize_screen.dart';
 
-/// Вкладка «Профиль» — как в Forum_ios `ProfileViewController`.
-class ProfileScreen extends StatelessWidget {
+enum _ProfileSection {
+  appearance,
+  privacy,
+  notifications,
+  language,
+  devices,
+  premium,
+}
+
+/// Вкладка «Профиль» — слева меню, справа выбранный раздел.
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  _ProfileSection _section = _ProfileSection.appearance;
+
+  static const _splitBreakpoint = 760.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final p = context.palette;
+    final isDark = state.isDark;
+    final leftBg = isDark ? p.bg1 : const Color(0xFFE8EAED);
+    final rightBg = isDark ? p.bg2 : const Color(0xFFF7F8FA);
+    final cardBg = isDark ? p.bg2 : Colors.white;
+    final separator = isDark ? p.border1 : const Color(0xFFE9E9E9);
+    final width = MediaQuery.sizeOf(context).width;
+    final split = width >= _splitBreakpoint;
+
+    final leftPane = ColoredBox(
+      color: leftBg,
+      child: SafeArea(
+        right: !split,
+        child: _ProfileMenuPane(
+          selected: _section,
+          cardBg: cardBg,
+          separator: separator,
+          onSelect: (section) {
+            if (split) {
+              setState(() => _section = section);
+            } else {
+              _openSectionFullScreen(context, section);
+            }
+          },
+        ),
+      ),
+    );
+
+    if (!split) {
+      return Scaffold(
+        backgroundColor: leftBg,
+        body: leftPane,
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: leftBg,
+      body: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: (width * 0.38).clamp(280.0, 400.0),
+            child: leftPane,
+          ),
+          Expanded(
+            child: ColoredBox(
+              color: rightBg,
+              child: SafeArea(
+                left: false,
+                child: KeyedSubtree(
+                  key: ValueKey(_section),
+                  child: _buildRightPane(),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRightPane() {
+    switch (_section) {
+      case _ProfileSection.appearance:
+        return const AppearanceScreen(embedded: true);
+      case _ProfileSection.privacy:
+        return const ProfilePlaceholderScreen(
+          title: 'Конфиденциальность',
+          embedded: true,
+        );
+      case _ProfileSection.notifications:
+        return const ProfilePlaceholderScreen(
+          title: 'Уведомления и звуки',
+          embedded: true,
+        );
+      case _ProfileSection.language:
+        return const ProfilePlaceholderScreen(
+          title: 'Язык',
+          embedded: true,
+        );
+      case _ProfileSection.devices:
+        return const DevicesMenuScreen(embedded: true);
+      case _ProfileSection.premium:
+        return const ProfilePlaceholderScreen(
+          title: 'Форум премиум',
+          embedded: true,
+        );
+    }
+  }
+
+  void _openSectionFullScreen(BuildContext context, _ProfileSection section) {
+    final Widget page;
+    switch (section) {
+      case _ProfileSection.appearance:
+        page = const AppearanceScreen();
+      case _ProfileSection.privacy:
+        page = const ProfilePlaceholderScreen(title: 'Конфиденциальность');
+      case _ProfileSection.notifications:
+        page = const ProfilePlaceholderScreen(title: 'Уведомления и звуки');
+      case _ProfileSection.language:
+        page = const ProfilePlaceholderScreen(title: 'Язык');
+      case _ProfileSection.devices:
+        page = const DevicesMenuScreen();
+      case _ProfileSection.premium:
+        page = const ProfilePlaceholderScreen(title: 'Форум премиум');
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => page),
+    );
+  }
+}
+
+class _ProfileMenuPane extends StatelessWidget {
+  final _ProfileSection selected;
+  final Color cardBg;
+  final Color separator;
+  final ValueChanged<_ProfileSection> onSelect;
+
+  const _ProfileMenuPane({
+    required this.selected,
+    required this.cardBg,
+    required this.separator,
+    required this.onSelect,
+  });
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final p = context.palette;
     final profile = state.profile;
-    final pageBg = state.isDark ? p.bg1 : const Color(0xFFF4F5F7);
-    final cardBg = state.isDark ? p.bg2 : Colors.white;
-    final separator = state.isDark ? p.border1 : const Color(0xFFE9E9E9);
 
-    return Scaffold(
-      backgroundColor: pageBg,
-      body: SafeArea(
-        child: CustomScrollView(
-          slivers: [
-            SliverToBoxAdapter(
-              child: ProfileContentFrame(
-                child: Column(
+    return CustomScrollView(
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(
-                          onPressed: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => const QrAuthorizeScreen(),
-                              ),
-                            );
-                          },
-                          tooltip: 'Авторизовать по QR-коду',
-                          icon: Icon(
-                            Icons.qr_code_scanner_rounded,
-                            color: p.purple,
-                            size: 24,
+                    IconButton(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const QrAuthorizeScreen(),
                           ),
-                          constraints: const BoxConstraints(
-                            minWidth: 28,
-                            minHeight: 28,
-                          ),
-                          padding: EdgeInsets.zero,
-                        ),
-                        IconButton(
-                          onPressed: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) => const EditProfileScreen(),
-                              ),
-                            );
-                          },
-                          tooltip: 'Редактировать',
-                          icon: Icon(
-                            Icons.edit_outlined,
-                            color: p.purple,
-                            size: 24,
-                          ),
-                          constraints: const BoxConstraints(
-                            minWidth: 28,
-                            minHeight: 28,
-                          ),
-                          padding: EdgeInsets.zero,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    _OwnProfileHero(profile: profile, pageBg: pageBg),
-                    const SizedBox(height: 16),
-                    Text(
-                      profile?.name.trim().isNotEmpty == true
-                          ? profile!.name
-                          : 'Пользователь',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: p.text1,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
+                        );
+                      },
+                      tooltip: 'Авторизовать по QR-коду',
+                      icon: Icon(
+                        Icons.qr_code_scanner_rounded,
+                        color: p.purple,
+                        size: 24,
                       ),
-                    ),
-                    if (_nick(profile).isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      _CopyNickButton(nick: _nick(profile)),
-                    ],
-                    if (_about(profile).isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        _about(profile),
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: p.text1,
-                          fontSize: 13,
-                          height: 1.16,
-                        ),
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
                       ),
-                    ],
-                    const SizedBox(height: 24),
-                  ],
-                ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: ProfileContentFrame(
-                child: _SettingsCard(
-                  background: cardBg,
-                  separator: separator,
-                  children: [
-                    _SettingsRow(
-                      icon: Icons.palette_outlined,
-                      label: 'Оформление',
-                      onTap: () {
+                      padding: EdgeInsets.zero,
+                    ),
+                    IconButton(
+                      onPressed: () {
                         Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) => const AppearanceScreen(),
+                            builder: (_) => const EditProfileScreen(),
                           ),
                         );
                       },
-                    ),
-                    _SettingsRow(
-                      icon: Icons.lock_outline_rounded,
-                      label: 'Конфиденциальность',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const ProfilePlaceholderScreen(
-                              title: 'Конфиденциальность',
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                    _SettingsRow(
-                      icon: Icons.notifications_none_rounded,
-                      label: 'Уведомления и звуки',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const ProfilePlaceholderScreen(
-                              title: 'Уведомления и звуки',
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                    _SettingsRow(
-                      icon: Icons.language_rounded,
-                      label: 'Язык',
-                      trailing: Text(
-                        'Русский',
-                        style: TextStyle(
-                          color: p.text3,
-                          fontSize: 13,
-                        ),
+                      tooltip: 'Редактировать',
+                      icon: Icon(
+                        Icons.edit_outlined,
+                        color: p.purple,
+                        size: 24,
                       ),
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const ProfilePlaceholderScreen(
-                              title: 'Язык',
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                    _SettingsRow(
-                      icon: Icons.devices_rounded,
-                      label: 'Устройства',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const DevicesMenuScreen(),
-                          ),
-                        );
-                      },
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
+                      ),
+                      padding: EdgeInsets.zero,
                     ),
                   ],
                 ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: ProfileContentFrame(
-                padding: const EdgeInsets.fromLTRB(0, 24, 0, 24),
-                child: _PremiumButton(
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const ProfilePlaceholderScreen(
-                          title: 'Форум премиум',
-                        ),
-                      ),
-                    );
-                  },
+                const SizedBox(height: 8),
+                _OwnProfileHero(profile: profile),
+                const SizedBox(height: 16),
+                Text(
+                  profile?.name.trim().isNotEmpty == true
+                      ? profile!.name
+                      : 'Пользователь',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: p.text1,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
+                if (_nick(profile).isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  _CopyNickButton(nick: _nick(profile)),
+                ],
+                if (_about(profile).isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _about(profile),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: p.text1,
+                      fontSize: 13,
+                      height: 1.16,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 24),
+              ],
             ),
-          ],
+          ),
         ),
-      ),
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _SettingsCard(
+              background: cardBg,
+              separator: separator,
+              children: [
+                _SettingsRow(
+                  icon: Icons.palette_outlined,
+                  label: 'Оформление',
+                  selected: selected == _ProfileSection.appearance,
+                  onTap: () => onSelect(_ProfileSection.appearance),
+                ),
+                _SettingsRow(
+                  icon: Icons.lock_outline_rounded,
+                  label: 'Конфиденциальность',
+                  selected: selected == _ProfileSection.privacy,
+                  onTap: () => onSelect(_ProfileSection.privacy),
+                ),
+                _SettingsRow(
+                  icon: Icons.notifications_none_rounded,
+                  label: 'Уведомления и звуки',
+                  selected: selected == _ProfileSection.notifications,
+                  onTap: () => onSelect(_ProfileSection.notifications),
+                ),
+                _SettingsRow(
+                  icon: Icons.language_rounded,
+                  label: 'Язык',
+                  selected: selected == _ProfileSection.language,
+                  trailing: Text(
+                    'Русский',
+                    style: TextStyle(
+                      color: p.text3,
+                      fontSize: 13,
+                    ),
+                  ),
+                  onTap: () => onSelect(_ProfileSection.language),
+                ),
+                _SettingsRow(
+                  icon: Icons.devices_rounded,
+                  label: 'Устройства',
+                  selected: selected == _ProfileSection.devices,
+                  onTap: () => onSelect(_ProfileSection.devices),
+                ),
+              ],
+            ),
+          ),
+        ),
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+            child: _PremiumButton(
+              selected: selected == _ProfileSection.premium,
+              onTap: () => onSelect(_ProfileSection.premium),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
   static String _nick(UserProfile? profile) {
-    final nick = profile?.nick.trim() ?? '';
-    return nick;
+    return profile?.nick.trim() ?? '';
   }
 
   static String _about(UserProfile? profile) {
@@ -230,12 +330,8 @@ class ProfileScreen extends StatelessWidget {
 
 class _OwnProfileHero extends StatelessWidget {
   final UserProfile? profile;
-  final Color pageBg;
 
-  const _OwnProfileHero({
-    required this.profile,
-    required this.pageBg,
-  });
+  const _OwnProfileHero({required this.profile});
 
   @override
   Widget build(BuildContext context) {
@@ -246,11 +342,10 @@ class _OwnProfileHero extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
-        height: 220,
+        height: 285,
         width: double.infinity,
         child: Stack(
           fit: StackFit.expand,
-          alignment: Alignment.center,
           children: [
             if (hasAva)
               ImageFiltered(
@@ -262,8 +357,14 @@ class _OwnProfileHero extends StatelessWidget {
               )
             else
               ColoredBox(color: p.bg3),
-            ColoredBox(color: Colors.black.withValues(alpha: 0.18)),
-            const ProfileAvatarEditor(size: 112, plusSize: 32),
+            ColoredBox(color: Colors.black.withValues(alpha: 0.22)),
+            const Center(
+              child: ProfileAvatarEditor(
+                size: 112,
+                plusSize: 32,
+                ringColor: Colors.white,
+              ),
+            ),
           ],
         ),
       ),
@@ -353,6 +454,7 @@ class _SettingsRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final Widget? trailing;
+  final bool selected;
   final VoidCallback onTap;
 
   const _SettingsRow({
@@ -360,13 +462,18 @@ class _SettingsRow extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.trailing,
+    this.selected = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
+    final highlight = selected
+        ? p.purple.withValues(alpha: 0.12)
+        : Colors.transparent;
+
     return Material(
-      color: Colors.transparent,
+      color: highlight,
       child: InkWell(
         onTap: onTap,
         child: SizedBox(
@@ -383,7 +490,8 @@ class _SettingsRow extends StatelessWidget {
                     style: TextStyle(
                       color: p.text1,
                       fontSize: 15,
-                      fontWeight: FontWeight.w400,
+                      fontWeight:
+                          selected ? FontWeight.w600 : FontWeight.w400,
                     ),
                   ),
                 ),
@@ -403,14 +511,18 @@ class _SettingsRow extends StatelessWidget {
 
 class _PremiumButton extends StatelessWidget {
   final VoidCallback onTap;
+  final bool selected;
 
-  const _PremiumButton({required this.onTap});
+  const _PremiumButton({
+    required this.onTap,
+    this.selected = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
     return Material(
-      color: p.purple,
+      color: selected ? p.purple.withValues(alpha: 0.85) : p.purple,
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: onTap,

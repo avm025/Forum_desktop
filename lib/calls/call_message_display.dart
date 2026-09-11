@@ -2,7 +2,7 @@ import 'dart:convert';
 
 /// Разбор body `type=call` и тексты для пузыря / списка / reply
 /// (iOS `DataConverter.callDisplay` / `callPreviewText`).
-/// Документация: https://4um.me:7770/api_forum_doc/ → msg_call
+/// Документация: https://4um.me/api_forum_doc/ → msg_call
 class CallMessageBody {
   final String media; // audio | video
   final String type; // missed | cancelled | talk

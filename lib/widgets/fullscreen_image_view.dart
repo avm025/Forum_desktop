@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../models/media_file.dart';
+import '../services/media_thumb_cache.dart';
 import '../utils/media_file_url.dart';
 import 'cached_forum_image.dart';
 
@@ -23,36 +24,70 @@ class FullscreenImageViewer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
+    final maxW = size.width - 32;
+    final maxH = size.height - 80;
     final hasBytes = file.bytes != null && file.bytes!.isNotEmpty;
     final preview = file.preview.trim();
     final resolved = MediaFileUrl.resolve(file);
     final localPath = file.URL?.trim() ?? '';
+    // Полный файл важнее preview — иначе мелькает мелкое превью/заглушка.
+    final networkUrl = resolved.isNotEmpty
+        ? resolved
+        : ((preview.startsWith('http://') || preview.startsWith('https://'))
+            ? preview
+            : '');
+
+    final thumb = MediaThumbCache.peekSync(file);
+    Widget? thumbPlaceholder;
+    if (thumb != null) {
+      thumbPlaceholder = Image.file(
+        thumb,
+        fit: BoxFit.contain,
+        width: maxW,
+        height: maxH,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.medium,
+      );
+    }
 
     Widget image;
     if (hasBytes) {
-      image = Image.memory(file.bytes!, fit: BoxFit.contain);
+      image = Image.memory(
+        file.bytes!,
+        fit: BoxFit.contain,
+        gaplessPlayback: true,
+        frameBuilder: (context, child, frame, sync) {
+          if (sync || frame != null) return child;
+          return thumbPlaceholder ?? const SizedBox.shrink();
+        },
+      );
     } else if (localPath.isNotEmpty &&
         !localPath.startsWith('http') &&
         File(localPath).existsSync()) {
-      image = Image.file(File(localPath), fit: BoxFit.contain);
-    } else if (preview.startsWith('http://') || preview.startsWith('https://')) {
-      image = CachedForumImage(
-        url: preview,
-        width: size.width - 32,
-        height: size.height - 80,
+      image = Image.file(
+        File(localPath),
         fit: BoxFit.contain,
+        gaplessPlayback: true,
+        frameBuilder: (context, child, frame, sync) {
+          if (sync || frame != null) return child;
+          return thumbPlaceholder ?? const SizedBox.shrink();
+        },
       );
-    } else if (resolved.isNotEmpty) {
+    } else if (networkUrl.isNotEmpty) {
       image = CachedForumImage(
-        url: resolved,
-        width: size.width - 32,
-        height: size.height - 80,
+        url: networkUrl,
+        width: maxW,
+        height: maxH,
         fit: BoxFit.contain,
+        blankWhileLoading: true,
+        placeholder: thumbPlaceholder,
+        fadeInDuration: Duration.zero,
+        fadeOutDuration: Duration.zero,
       );
+    } else if (thumbPlaceholder != null) {
+      image = thumbPlaceholder;
     } else {
-      image = const Center(
-        child: Icon(Icons.broken_image_outlined, color: Colors.white54, size: 64),
-      );
+      image = const SizedBox.shrink();
     }
 
     return Dialog(

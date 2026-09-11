@@ -29,7 +29,17 @@ class FileKind {
   }
 
   static bool isVideoKind(String kind) {
-    return const {'mp4', 'mov', 'avi', 'mkv', 'webm', 'ogg'}.contains(kind);
+    final k = kind.trim().toLowerCase();
+    return const {
+      'video',
+      'mp4',
+      'mov',
+      'avi',
+      'mkv',
+      'webm',
+      'ogg',
+      'm4v',
+    }.contains(k);
   }
 
   static bool isImageKind(String kind) {

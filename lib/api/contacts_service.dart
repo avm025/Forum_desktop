@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 
+import '../utils/utf16.dart';
+
 /// Контакт для запроса dlg_list.
 class ApiContact {
   final String phone;
@@ -47,7 +49,7 @@ class ContactsService {
     final seen = <String>{};
 
     for (final c in raw) {
-      final name = c.displayName.trim();
+      final name = sanitizeUtf16(c.displayName.trim());
       for (final phone in c.phones) {
         final normalized = _normalizePhone(phone.number);
         if (normalized.isEmpty || seen.contains(normalized)) continue;

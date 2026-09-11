@@ -97,9 +97,15 @@ class MediaFileLoader {
       if (!await existing.exists() || await existing.length() <= 0) {
         return null;
       }
+      if (!await _looksLikeExpectedMedia(file, existing)) {
+        return null;
+      }
       if (existing.path == desired.path) return desired.path;
       if (!await desired.exists() || await desired.length() <= 0) {
         await desired.parent.create(recursive: true);
+        await existing.copy(desired.path);
+      } else if (!await _looksLikeExpectedMedia(file, desired)) {
+        await desired.delete();
         await existing.copy(desired.path);
       }
       return desired.path;
@@ -118,7 +124,12 @@ class MediaFileLoader {
 
     if (url.startsWith('http://') || url.startsWith('https://')) {
       if (await desired.exists() && await desired.length() > 0) {
-        return desired.path;
+        if (await _looksLikeExpectedMedia(file, desired)) {
+          return desired.path;
+        }
+        try {
+          await desired.delete();
+        } catch (_) {}
       }
       final legacy = await _legacyCacheFile(file);
       final migrated = await migrateIfNeeded(legacy);
@@ -185,29 +196,134 @@ class MediaFileLoader {
 
   static Future<File> _cacheRemote(MediaFile file, String url) async {
     final local = await _cacheFileFor(file);
+    final resolvedUrl = ApiConfig.rewriteLegacyHost(url.trim());
 
     if (await local.exists() && await local.length() > 0) {
-      return local;
+      if (await _looksLikeExpectedMedia(file, local)) {
+        return local;
+      }
+      // Битый/чужой кэш (часто JPEG-превью или HTML 401 под именем видео).
+      try {
+        await local.delete();
+      } catch (_) {}
     }
 
     // Переносим из старого имени (hash/fname), если уже скачивали раньше.
     final legacy = await _legacyCacheFile(file);
     if (await legacy.exists() && await legacy.length() > 0) {
-      await legacy.copy(local.path);
-      return local;
+      if (await _looksLikeExpectedMedia(file, legacy)) {
+        await legacy.copy(local.path);
+        return local;
+      }
     }
 
     final response = await http
         .get(
-          Uri.parse(url),
+          Uri.parse(resolvedUrl),
           headers: ApiConfig.fileHeaders,
         )
-        .timeout(const Duration(seconds: 90));
+        .timeout(const Duration(seconds: 120));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('HTTP ${response.statusCode}');
+    }
+    if (response.bodyBytes.isEmpty) {
+      throw StateError('Пустой ответ сервера');
+    }
+    // Сервер иногда отдаёт HTML/JSON ошибки с кодом 200.
+    if (_looksLikeHtmlOrJson(response.bodyBytes)) {
+      throw StateError('Сервер вернул не медиафайл');
     }
 
     await local.writeAsBytes(response.bodyBytes, flush: true);
     return local;
+  }
+
+  /// Видео не должно быть JPEG/PNG; иначе это превью под чужим именем.
+  static Future<bool> _looksLikeExpectedMedia(MediaFile file, File local) async {
+    try {
+      final raf = await local.open();
+      final header = await raf.read(16);
+      await raf.close();
+      if (header.isEmpty) return false;
+
+      final isJpeg = header.length >= 3 &&
+          header[0] == 0xFF &&
+          header[1] == 0xD8 &&
+          header[2] == 0xFF;
+      final isPng = header.length >= 8 &&
+          header[0] == 0x89 &&
+          header[1] == 0x50 &&
+          header[2] == 0x4E &&
+          header[3] == 0x47;
+      final isGif = header.length >= 3 &&
+          header[0] == 0x47 &&
+          header[1] == 0x49 &&
+          header[2] == 0x46;
+      final isHtml = header[0] == 0x3C /* < */ ||
+          (header.length >= 5 &&
+              String.fromCharCodes(header.take(5)).toLowerCase() == '<!doc');
+
+      if (isHtml) return false;
+
+      if (file.isAudio) {
+        // JPEG/PNG вместо аудио — битый кэш.
+        if (isJpeg || isPng || isGif) return false;
+        // MP3 frame / ID3
+        if (header.length >= 3 &&
+            header[0] == 0x49 &&
+            header[1] == 0x44 &&
+            header[2] == 0x33) {
+          return true;
+        }
+        // AAC/M4A/MP4 audio: ftyp
+        if (header.length >= 8 &&
+            String.fromCharCodes(header.sublist(4, 8)) == 'ftyp') {
+          return true;
+        }
+        // MPEG frame sync
+        if (header.length >= 2 && header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) {
+          return true;
+        }
+        return !isJpeg && !isPng && !isGif;
+      }
+
+      if (file.isVideo) {
+        if (isJpeg || isPng || isGif) return false;
+        // MP4/MOV: ftyp box often at offset 4.
+        if (header.length >= 8) {
+          final box = String.fromCharCodes(header.sublist(4, 8));
+          if (box == 'ftyp') return true;
+        }
+        // WebM / Matroska EBML
+        if (header.length >= 4 &&
+            header[0] == 0x1A &&
+            header[1] == 0x45 &&
+            header[2] == 0xDF &&
+            header[3] == 0xA3) {
+          return true;
+        }
+        // Неизвестный контейнер, но явно не картинка — пробуем играть.
+        return true;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static bool _looksLikeHtmlOrJson(List<int> bytes) {
+    if (bytes.isEmpty) return false;
+    // Skip BOM / whitespace
+    var i = 0;
+    while (i < bytes.length &&
+        (bytes[i] == 0x20 ||
+            bytes[i] == 0x0A ||
+            bytes[i] == 0x0D ||
+            bytes[i] == 0x09)) {
+      i++;
+    }
+    if (i >= bytes.length) return false;
+    final c = bytes[i];
+    return c == 0x3C /* < */ || c == 0x7B /* { */ || c == 0x5B /* [ */;
   }
 }

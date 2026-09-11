@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/utf16.dart';
 import 'avatar_widget.dart';
 
 /// Экран «Написать сообщение» — выбор контакта (iOS NewMessageViewController).
@@ -44,8 +45,7 @@ class _NewMessagePickerState extends State<NewMessagePicker> {
   ) {
     final map = <String, List<DialogsListViewModel>>{};
     for (final c in contacts) {
-      final name = c.chatName.trim();
-      final letter = name.isNotEmpty ? name[0].toUpperCase() : '#';
+      final letter = sectionLetterForName(c.chatName);
       map.putIfAbsent(letter, () => <DialogsListViewModel>[]).add(c);
     }
     final keys = map.keys.toList()
@@ -105,6 +105,7 @@ class _NewMessagePickerState extends State<NewMessagePicker> {
               ),
               child: TextField(
                 onChanged: (v) => setState(() => _query = v),
+                inputFormatters: const [Utf16SanitizingFormatter()],
                 style: TextStyle(color: p.text1, fontSize: 15),
                 textAlignVertical: TextAlignVertical.center,
                 decoration: InputDecoration(

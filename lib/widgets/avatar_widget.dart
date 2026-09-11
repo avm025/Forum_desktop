@@ -2,6 +2,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../api/api_config.dart';
 import '../state/app_state.dart';
 import '../theme/app_colors.dart';
 
@@ -105,7 +106,8 @@ class AvatarWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final gradient = _gradientColors(context);
-    final url = avatarUrl.trim();
+    // CDN/ava часто относиются как относительный путь и требуют Bearer/Key.
+    final url = ApiConfig.resolveAssetUrl(avatarUrl);
     final hasPhoto = url.isNotEmpty;
 
     Widget avatar;
@@ -113,6 +115,7 @@ class AvatarWidget extends StatelessWidget {
       avatar = ClipOval(
         child: CachedNetworkImage(
           imageUrl: url,
+          httpHeaders: ApiConfig.fileHeaders,
           width: size,
           height: size,
           fit: BoxFit.cover,

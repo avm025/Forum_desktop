@@ -13,35 +13,69 @@ import '../widgets/dialogs_sidebar.dart';
 import '../models/dialogs_list_view_model.dart';
 
 /// Главный экран: адаптивный двухпанельный layout.
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   static const double _twoPaneBreakpoint = 760;
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      context.read<AppState>().onAppResumed();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final p = context.palette;
 
+    final wide =
+        MediaQuery.sizeOf(context).width >= HomeScreen._twoPaneBreakpoint;
+    final navUnderSidebar = wide && state.navTab == BottomNavTab.chats;
+
     return Scaffold(
       backgroundColor: p.bg1,
       body: Column(
         children: [
-          Expanded(child: _buildBody(context, state, p)),
-          const SafeArea(
-            top: false,
-            child: ForumBottomNav(),
-          ),
+          Expanded(child: _buildBody(context, state, p, wide: wide)),
+          if (!navUnderSidebar)
+            const SafeArea(
+              top: false,
+              child: ForumBottomNav(),
+            ),
         ],
       ),
     );
   }
 
-  Widget _buildBody(BuildContext context, AppState state, ForumPalette p) {
+  Widget _buildBody(
+    BuildContext context,
+    AppState state,
+    ForumPalette p, {
+    required bool wide,
+  }) {
     // Без IndexedStack вкладок: неактивные вкладки с OverlayPortal
     // (поля ввода/скролл) при активации ломают layout.
     return switch (state.navTab) {
-      BottomNavTab.chats => _buildChatsPane(context, state, p),
+      BottomNavTab.chats => _buildChatsPane(context, state, p, wide: wide),
       BottomNavTab.projects => _PlaceholderTab(palette: p, title: 'Проекты'),
       BottomNavTab.tasks => _PlaceholderTab(palette: p, title: 'Задачи'),
       BottomNavTab.newLog => const ApiLogScreen(),
@@ -52,13 +86,12 @@ class HomeScreen extends StatelessWidget {
   Widget _buildChatsPane(
     BuildContext context,
     AppState state,
-    ForumPalette p,
-  ) {
+    ForumPalette p, {
+    required bool wide,
+  }) {
     final selected = state.selectedDialog;
     // MediaQuery вместо LayoutBuilder: иначе при смене чата OverlayPortal
     // (Scrollbar/Navigator) активируется внутри performLayout → краш.
-    final wide =
-        MediaQuery.sizeOf(context).width >= _twoPaneBreakpoint;
 
     if (wide) {
       return _ResizableChatsSplit(
@@ -173,7 +206,15 @@ class _ResizableChatsSplitState extends State<_ResizableChatsSplit> {
       children: [
         SizedBox(
           width: width,
-          child: const DialogsSidebar(),
+          child: const Column(
+            children: [
+              Expanded(child: DialogsSidebar()),
+              SafeArea(
+                top: false,
+                child: ForumBottomNav(),
+              ),
+            ],
+          ),
         ),
         MouseRegion(
           cursor: SystemMouseCursors.resizeColumn,

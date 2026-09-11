@@ -13,13 +13,17 @@ class MsgListMerge {
     required DialogsListViewModel dialog,
     required MsgListResult result,
     required void Function(bool hasMoreHistory) onHistoryPagination,
+    bool replace = false,
   }) {
     if (result.messages.isEmpty) {
       if (result.isHistory) onHistoryPagination(false);
       return;
     }
 
-    if (result.isHistory) {
+    if (replace) {
+      dialog.messages = List.of(result.messages);
+      onHistoryPagination(result.hasMoreHistory);
+    } else if (result.isHistory) {
       _prependHistory(dialog, result.messages);
       onHistoryPagination(result.hasMoreHistory);
     } else {
@@ -39,8 +43,12 @@ class MsgListMerge {
     required MessageViewModel incoming,
   }) {
     final idx = _findMatchIndex(dialog.messages, incoming);
-    if (idx != null) {
-      final existing = dialog.messages[idx];
+    final liveIdx =
+        idx == null ? _findLiveLocationIndex(dialog.messages, incoming) : null;
+    final match = idx ?? liveIdx;
+    if (match != null) {
+      final existing = dialog.messages[match];
+      final keepId = liveIdx != null ? existing.id : null;
       // Не затирать локальный cancelled/missed серверным talk duration:0
       // (бывает после ошибочного hangup до ответа).
       if (_shouldKeepLocalCallResult(existing, incoming)) {
@@ -52,6 +60,9 @@ class MsgListMerge {
         return true;
       }
       MessageMapper.updateFromServer(existing, incoming);
+      if (keepId != null && keepId.isNotEmpty) {
+        existing.id = keepId;
+      }
       return true;
     }
 
@@ -126,6 +137,24 @@ class MsgListMerge {
       }
     }
 
+    return null;
+  }
+
+  /// Обновления geotr с новым id сливаются в текущую live-точку того же автора.
+  static int? _findLiveLocationIndex(
+    List<MessageViewModel> messages,
+    MessageViewModel incoming,
+  ) {
+    if (!incoming.isLocation) return null;
+    final fr = incoming.fr_id?.trim() ?? '';
+    if (fr.isEmpty) return null;
+    for (var i = messages.length - 1; i >= 0; i--) {
+      final existing = messages[i];
+      if (!existing.isLocation) continue;
+      if (!existing.locationLive) continue;
+      if ((existing.fr_id ?? '').trim() != fr) continue;
+      return i;
+    }
     return null;
   }
 

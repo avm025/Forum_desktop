@@ -24,11 +24,12 @@ dependencies:
   crypto: ^3.0.6
   image: ^4.5.4
   video_player: ^2.9.2
+  just_audio: ^0.9.46
   firebase_core: ^4.12.1
   firebase_messaging: ^16.4.3
   qr_flutter: ^4.1.0
-  super_drag_and_drop: ^0.10.0-dev.2
-  super_clipboard: ^0.10.0-dev.2
+  super_drag_and_drop: ^0.9.1
+  super_clipboard: ^0.9.1
   livekit_client: ^2.11.0
 
 dev_dependencies:
@@ -42,5 +43,9 @@ flutter:
   uses-material-design: true
 
 # Avoid jni FFI being pulled into Windows desktop builds via path_provider_android 2.3+.
+# connectivity_plus 7.1+ uses NWPath.isUltraConstrained (macOS/iOS 26 SDK); Xcode 16 / macOS 15.5 SDK cannot compile it.
+# livekit_client 2.11 needs device_info_plus >=12; super_native_extensions 0.9.x declares <12 — override to keep stable 0.9 (no rustup).
 dependency_overrides:
   path_provider_android: 2.2.17
+  connectivity_plus: 7.0.0
+  device_info_plus: 12.4.0

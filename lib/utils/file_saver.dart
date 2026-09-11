@@ -19,20 +19,12 @@ enum FileSaveResult {
 class FileSaver {
   FileSaver._();
 
+  /// Сначала диалог Finder/Проводник, потом копирование из локального кэша.
+  /// Без предварительной загрузки — иначе окно открывается с большой задержкой.
   static Future<FileSaveResult> save(MediaFile file) async {
     if (kIsWeb) return FileSaveResult.failed;
 
     try {
-      final downloadUrl = MediaFileUrl.resolve(file);
-      if (downloadUrl.isEmpty) return FileSaveResult.failed;
-
-      final source = await MediaFileLoader.resolve(
-        file,
-        downloadUrl: downloadUrl,
-      );
-      final bytes = await _readBytes(source);
-      if (bytes == null || bytes.isEmpty) return FileSaveResult.failed;
-
       final fileName = _fileName(file);
       final pickedPath = await FilePicker.platform.saveFile(
         dialogTitle: 'Сохранить файл',
@@ -44,19 +36,63 @@ class FileSaver {
       }
 
       final targetPath = _normalizeSavePath(pickedPath.trim(), fileName);
-      await File(targetPath).writeAsBytes(bytes, flush: true);
-      return FileSaveResult.saved;
+
+      if (file.bytes != null && file.bytes!.isNotEmpty) {
+        await File(targetPath).writeAsBytes(file.bytes!, flush: true);
+        return FileSaveResult.saved;
+      }
+
+      final cached = await MediaFileLoader.cachedPathIfExists(
+        file,
+        downloadUrl: MediaFileUrl.resolve(file),
+      );
+      if (cached != null && cached.isNotEmpty) {
+        await File(cached).copy(targetPath);
+        return FileSaveResult.saved;
+      }
+
+      // Fallback: докачать, если локальной копии нет.
+      final source = await MediaFileLoader.resolve(
+        file,
+        downloadUrl: MediaFileUrl.resolve(file),
+      );
+      if (source.hasLocalPath) {
+        await File(source.localPath!).copy(targetPath);
+        return FileSaveResult.saved;
+      }
+      if (source.hasBytes) {
+        await File(targetPath).writeAsBytes(source.bytes!, flush: true);
+        return FileSaveResult.saved;
+      }
+      return FileSaveResult.failed;
     } catch (_) {
       return FileSaveResult.failed;
     }
   }
 
-  static Future<Uint8List?> _readBytes(MediaFileSource source) async {
-    if (source.hasBytes) return source.bytes;
-    if (source.hasLocalPath) {
-      return File(source.localPath!).readAsBytes();
+  /// Сохранение сырых байтов (например снимок карты геопозиции).
+  static Future<FileSaveResult> saveBytes({
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    if (kIsWeb) return FileSaveResult.failed;
+    if (bytes.isEmpty) return FileSaveResult.failed;
+
+    try {
+      final pickedPath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Сохранить файл',
+        fileName: fileName,
+        type: FileType.any,
+      );
+      if (pickedPath == null || pickedPath.trim().isEmpty) {
+        return FileSaveResult.cancelled;
+      }
+      final targetPath = _normalizeSavePath(pickedPath.trim(), fileName);
+      await File(targetPath).writeAsBytes(bytes, flush: true);
+      return FileSaveResult.saved;
+    } catch (_) {
+      return FileSaveResult.failed;
     }
-    return null;
   }
 
   static String _fileName(MediaFile file) {

@@ -2,17 +2,17 @@
 class ApiConfig {
   ApiConfig._();
 
-  static const String wsHost = 'wss://4um.me:7770';
-  static const String httpBase = 'https://4um.me:7770';
+  static const String wsHost = 'wss://4um.me/ws';
+  static const String httpBase = 'https://4um.me';
 
   /// Полный путь к файлам в сообщениях: file_server + fdir + fname.
   static const String fileServer = 'https://4um.me/files/';
 
   /// HTTP API (msg_list и др.).
-  static const String httpApiUrl = 'https://4um.me:7770/api/';
+  static const String httpApiUrl = 'https://4um.me/api/';
 
   /// Upload медиа/файлов (WS_MSG_MEDIA.md — GL.upload_server).
-  static const String uploadServerUrl = 'https://4um.me:7770/api/upload/';
+  static const String uploadServerUrl = 'https://4um.me/api/upload/';
 
   /// Заголовок Key для HTTP-запросов.
   static const String apiKey = 'Ru*)P(-ro.pro';
@@ -46,7 +46,8 @@ class ApiConfig {
 
   /// Control-plane WebSocket для звонков (Forum CallModule / SignalingClient).
   /// LiveKit URL/JWT приходят в событии `call.token`.
-  static const String callSignalingWs = 'wss://4um.me:8088/ws';
+  static const String callSignalingWs = 'wss://webrtc.4um.me';
+  static const String liveKitWs = 'wss://livekit.4um.me';
 
   /// Auth только сообщением `{"type":"auth","payload":{"token":...}}` → `auth.ok`.
   static Uri callSignalingUriForToken(String sessionToken) {
@@ -67,9 +68,31 @@ class ApiConfig {
       };
 
   /// URL аватара/медиа по относительному пути с основного сервера.
+  /// Старые порты (:7770 / :8088 / :7880) → публичные хосты без порта.
+  static String rewriteLegacyHost(String url) {
+    var out = url.trim();
+    if (out.isEmpty) return out;
+    out = out.replaceAll('https://4um.me:7770', httpBase);
+    out = out.replaceAll('wss://4um.me:7770/ws', wsHost);
+    out = out.replaceAll('wss://4um.me:7770', wsHost);
+    out = out.replaceAll('wss://4um.me:8088/ws', callSignalingWs);
+    out = out.replaceAll('wss://4um.me:8088', callSignalingWs);
+    out = out.replaceAll('wss://4um.me:7880', liveKitWs);
+    out = out.replaceAll('https://4um.me:7880', liveKitWs);
+    return out;
+  }
+
+  static String resolveLiveKitUrl(String url) {
+    final rewritten = rewriteLegacyHost(url);
+    if (rewritten.isEmpty) return liveKitWs;
+    return rewritten;
+  }
+
   static String mediaUrl(String? path) {
     if (path == null || path.isEmpty) return '';
-    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return rewriteLegacyHost(path);
+    }
     if (path.startsWith('/')) return '$httpBase$path';
     return '$httpBase/$path';
   }
@@ -78,7 +101,9 @@ class ApiConfig {
   static String resolveAssetUrl(String? path) {
     if (path == null || path.isEmpty) return '';
     final raw = path.trim();
-    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return rewriteLegacyHost(raw);
+    }
 
     final base = fileServer.endsWith('/') ? fileServer : '$fileServer/';
     if (raw.startsWith('/files/')) return '$base${raw.substring(7)}';

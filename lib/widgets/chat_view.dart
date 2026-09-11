@@ -207,8 +207,8 @@ class _ChatViewState extends State<ChatView> {
   DialogsListViewModel _resolveDialog(AppState state) {
     final dlgId = widget.dialog.id;
     if (dlgId == null) return widget.dialog;
-    for (final d in state.dialogs) {
-      if (d.id == dlgId) return d;
+    for (final d in state.allDialogs) {
+      if (AppState.dlgIdsEqual(d.id, dlgId)) return d;
     }
     return widget.dialog;
   }
@@ -262,8 +262,8 @@ class _ChatViewState extends State<ChatView> {
   ) {
     final dlgId = fallback.id;
     if (dlgId == null) return fallback;
-    for (final d in state.dialogs) {
-      if (d.id == dlgId) return d;
+    for (final d in state.allDialogs) {
+      if (AppState.dlgIdsEqual(d.id, dlgId)) return d;
     }
     return fallback;
   }

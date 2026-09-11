@@ -12,6 +12,12 @@ class CachedForumImage extends StatelessWidget {
   final double? height;
   final BoxFit fit;
   final BorderRadius? borderRadius;
+  /// Нейтральный фон вместо градиента/иконки на время загрузки.
+  final bool blankWhileLoading;
+  /// Свой placeholder (например, уже готовый thumbnail).
+  final Widget? placeholder;
+  final Duration fadeInDuration;
+  final Duration fadeOutDuration;
 
   const CachedForumImage({
     super.key,
@@ -20,12 +26,16 @@ class CachedForumImage extends StatelessWidget {
     this.height,
     this.fit = BoxFit.cover,
     this.borderRadius,
+    this.blankWhileLoading = false,
+    this.placeholder,
+    this.fadeInDuration = const Duration(milliseconds: 500),
+    this.fadeOutDuration = const Duration(milliseconds: 1000),
   });
 
   @override
   Widget build(BuildContext context) {
     if (url.isEmpty) {
-      return _placeholder(width, height);
+      return _loadingPlaceholder(width, height);
     }
 
     Widget image = CachedNetworkImage(
@@ -34,8 +44,10 @@ class CachedForumImage extends StatelessWidget {
       width: width,
       height: height,
       fit: fit,
-      placeholder: (_, __) => _placeholder(width, height),
-      errorWidget: (_, __, ___) => _placeholder(width, height, error: true),
+      fadeInDuration: fadeInDuration,
+      fadeOutDuration: fadeOutDuration,
+      placeholder: (_, __) => _loadingPlaceholder(width, height),
+      errorWidget: (_, __, ___) => _errorPlaceholder(width, height),
     );
 
     if (borderRadius != null) {
@@ -44,7 +56,25 @@ class CachedForumImage extends StatelessWidget {
     return image;
   }
 
-  Widget _placeholder(double? w, double? h, {bool error = false}) {
+  Widget _loadingPlaceholder(double? w, double? h) {
+    if (placeholder != null) {
+      return SizedBox(width: w, height: h, child: placeholder);
+    }
+    if (blankWhileLoading) {
+      return SizedBox(
+        width: w,
+        height: h,
+        child: const ColoredBox(color: Colors.transparent),
+      );
+    }
+    return _decoratedPlaceholder(w, h, error: false);
+  }
+
+  Widget _errorPlaceholder(double? w, double? h) {
+    return _decoratedPlaceholder(w, h, error: true);
+  }
+
+  Widget _decoratedPlaceholder(double? w, double? h, {required bool error}) {
     final gradient = AppColors.avatarGradientFor(url);
     return Container(
       width: w,

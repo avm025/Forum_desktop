@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import 'create_group_picker.dart';
 import 'folder_chat_picker.dart';
 import 'new_message_picker.dart';
 
@@ -86,6 +87,7 @@ class CreateChatMenu {
       case CreateChatMenuAction.message:
         await NewMessagePicker.open(context);
       case CreateChatMenuAction.group:
+        await CreateGroupPicker.open(context);
       case CreateChatMenuAction.aiChat:
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Скоро')),

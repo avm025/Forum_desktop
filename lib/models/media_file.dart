@@ -44,9 +44,59 @@ class MediaFile {
   double get widthValue => double.tryParse(width) ?? 0;
   double get heightValue => double.tryParse(height) ?? 0;
 
-  bool get isVideo =>
-      duration > 0 ||
-      const {'mp4', 'mov', 'avi', 'mkv', 'webm', 'ogg'}.contains(kind);
+  /// Видео: kind/расширение (в т.ч. серверный `video`).
+  /// Голосовые (m4a/mp3) с duration > 0 — НЕ видео.
+  bool get isVideo {
+    final k = kind.trim().toLowerCase();
+    final ext = formatLabel.toLowerCase();
+    if (_audioExts.contains(k) || _audioExts.contains(ext)) return false;
+    if (k == 'video' || _videoExts.contains(k)) return true;
+    if (_videoExts.contains(ext)) return true;
+    // duration>0 у jpg/png не считаем видео (бывает мусор в payload).
+    if (duration > 0 && !_imageExts.contains(k) && !_imageExts.contains(ext)) {
+      return true;
+    }
+    return false;
+  }
+
+  bool get isAudio {
+    final k = kind.trim().toLowerCase();
+    final ext = formatLabel.toLowerCase();
+    return _audioExts.contains(k) || _audioExts.contains(ext);
+  }
+
+  static const _audioExts = {
+    'm4a',
+    'mp3',
+    'aac',
+    'wav',
+    'opus',
+    'flac',
+    'ogg',
+    'voice',
+  };
+
+  static const _videoExts = {
+    'mp4',
+    'mov',
+    'avi',
+    'mkv',
+    'webm',
+    'm4v',
+  };
+
+  static const _imageExts = {
+    'jpg',
+    'jpeg',
+    'png',
+    'gif',
+    'webp',
+    'heic',
+    'heif',
+    'bmp',
+    'img',
+    'image',
+  };
 
   /// Размер превью в чате с сохранением пропорций (без обрезки).
   Size chatDisplaySize({double maxWidth = 280, double maxHeight = 420}) {

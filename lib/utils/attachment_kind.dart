@@ -1,4 +1,5 @@
 import '../models/media_file.dart';
+import 'file_kind.dart';
 
 /// Тип вложения для выбора просмотрщика в чате.
 enum AttachmentViewKind { image, video, pdf, text, other }
@@ -7,7 +8,11 @@ class AttachmentKind {
   AttachmentKind._();
 
   static AttachmentViewKind of(MediaFile file) {
-    if (file.isVideo) return AttachmentViewKind.video;
+    if (file.isVideo || FileKind.isVideoKind(file.kind)) {
+      return AttachmentViewKind.video;
+    }
+    final ext = file.formatLabel.toLowerCase();
+    if (FileKind.isVideoKind(ext)) return AttachmentViewKind.video;
     if (_isPdf(file)) return AttachmentViewKind.pdf;
     if (_isText(file)) return AttachmentViewKind.text;
     if (_isImage(file)) return AttachmentViewKind.image;

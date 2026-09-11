@@ -15,6 +15,7 @@ import '../utils/cursor_position.dart';
 import '../utils/emoticon_replacer.dart';
 import '../utils/file_kind.dart';
 import '../utils/media_message_layout.dart';
+import '../utils/utf16.dart';
 import 'message_composer_reply.dart';
 
 /// Поле ввода сообщения: скрепка, текст, кнопка отправки/микрофон.
@@ -30,6 +31,7 @@ class _MessageInputState extends State<MessageInput> {
   final _focusNode = FocusNode();
   bool _hasText = false;
   MessageViewModel? _lastReplyTarget;
+  MessageViewModel? _lastEditTarget;
   String? _boundDlgId;
   int _appliedDraftEpoch = -1;
   bool _syncingText = false;
@@ -89,6 +91,19 @@ class _MessageInputState extends State<MessageInput> {
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    // Enter — отправка; Shift+Enter — новая строка + каретка в поле.
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
+        _ensureComposerCaret();
+        _insertNewlineAtCaret();
+        return KeyEventResult.handled;
+      }
+      unawaited(_send());
+      return KeyEventResult.handled;
+    }
+
     final isPaste = (event.logicalKey == LogicalKeyboardKey.keyV) &&
         (HardwareKeyboard.instance.isMetaPressed ||
             HardwareKeyboard.instance.isControlPressed);
@@ -99,6 +114,52 @@ class _MessageInputState extends State<MessageInput> {
     if (_pasteBusy) return KeyEventResult.handled;
     unawaited(_handlePasteKey());
     return KeyEventResult.handled;
+  }
+
+  void _ensureComposerCaret() {
+    if (!_focusNode.hasFocus) {
+      _focusNode.requestFocus();
+    }
+    final sel = _controller.selection;
+    if (!sel.isValid) {
+      final len = _controller.text.length;
+      _controller.selection = TextSelection.collapsed(
+        offset: len,
+        affinity: TextAffinity.downstream,
+      );
+    }
+  }
+
+  void _insertNewlineAtCaret() {
+    final value = _controller.value;
+    final selection = value.selection.isValid
+        ? value.selection
+        : TextSelection.collapsed(offset: value.text.length);
+    final start = selection.start;
+    final end = selection.end;
+    final next = value.text.replaceRange(start, end, '\n');
+    final caret = start + 1;
+    _syncingText = true;
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(
+        offset: caret,
+        affinity: TextAffinity.downstream,
+      ),
+      composing: TextRange.empty,
+    );
+    _syncingText = false;
+    final has = next.trim().isNotEmpty;
+    if (has != _hasText) setState(() => _hasText = has);
+    context.read<AppState>().reportComposerText(next);
+    // Каретка должна мигать в поле после перевода строки.
+    if (!_focusNode.hasFocus) {
+      _focusNode.requestFocus();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_focusNode.hasFocus) _focusNode.requestFocus();
+    });
   }
 
   Future<void> _handlePasteKey() async {
@@ -173,17 +234,18 @@ class _MessageInputState extends State<MessageInput> {
       final data = await Clipboard.getData(Clipboard.kTextPlain);
       final text = data?.text;
       if (text == null || text.isEmpty || !mounted) return;
+      final safe = sanitizeUtf16(text);
       final value = _controller.value;
       final start = value.selection.start >= 0
           ? value.selection.start
           : value.text.length;
       final end =
           value.selection.end >= 0 ? value.selection.end : value.text.length;
-      final newText = value.text.replaceRange(start, end, text);
+      final newText = value.text.replaceRange(start, end, safe);
       _syncingText = true;
       _controller.value = TextEditingValue(
         text: newText,
-        selection: TextSelection.collapsed(offset: start + text.length),
+        selection: TextSelection.collapsed(offset: start + safe.length),
       );
       _syncingText = false;
       setState(() => _hasText = newText.trim().isNotEmpty);
@@ -227,9 +289,9 @@ class _MessageInputState extends State<MessageInput> {
       return;
     }
 
-    final draft = state.takeComposerDraft(dlgId);
+    final draft = sanitizeUtf16(state.takeComposerDraft(dlgId) ?? '');
     _appliedDraftEpoch = state.composerDraftEpoch;
-    if (draft == null || draft.isEmpty) return;
+    if (draft.isEmpty) return;
 
     _syncingText = true;
     _controller.value = TextEditingValue(
@@ -245,14 +307,21 @@ class _MessageInputState extends State<MessageInput> {
     final text = EmoticonReplacer.replace(_controller.text.trim());
     if (text.isEmpty) return;
 
+    final state = context.read<AppState>();
+    final editing = state.editingMessage;
+
     // Очищаем поле до append скелета — пузырь и текст в одном кадре.
     _syncingText = true;
     _controller.clear();
     _syncingText = false;
     if (_hasText) setState(() => _hasText = false);
-    context.read<AppState>().reportComposerText('');
+    state.reportComposerText('');
 
-    await context.read<AppState>().sendMessage(text);
+    if (editing != null) {
+      await state.submitEditedMessage(text);
+      return;
+    }
+    await state.sendMessage(text);
   }
 
   Future<void> _openAttachMenu() async {
@@ -392,8 +461,31 @@ class _MessageInputState extends State<MessageInput> {
     final state = context.watch<AppState>();
     final p = context.palette;
     final replyTo = state.replyToMessage;
+    final editing = state.editingMessage;
 
     _scheduleDialogBinding(state);
+
+    if (editing != null && !identical(editing, _lastEditTarget)) {
+      _lastEditTarget = editing;
+      final seed = editing.body.trim().isNotEmpty
+          ? editing.body.trim()
+          : (editing.desc.trim().isNotEmpty
+              ? editing.desc.trim()
+              : editing.text.trim());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _syncingText = true;
+        _controller.value = TextEditingValue(
+          text: seed,
+          selection: TextSelection.collapsed(offset: seed.length),
+        );
+        _syncingText = false;
+        setState(() => _hasText = seed.trim().isNotEmpty);
+        _focusNode.requestFocus();
+      });
+    } else if (editing == null) {
+      _lastEditTarget = null;
+    }
 
     if (replyTo != null && !identical(replyTo, _lastReplyTarget)) {
       _lastReplyTarget = replyTo;
@@ -403,6 +495,8 @@ class _MessageInputState extends State<MessageInput> {
     } else if (replyTo == null) {
       _lastReplyTarget = null;
     }
+
+    final banner = editing ?? replyTo;
 
     return Listener(
       behavior: HitTestBehavior.translucent,
@@ -415,10 +509,17 @@ class _MessageInputState extends State<MessageInput> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (replyTo != null)
+            if (banner != null)
               MessageComposerReply(
-                message: replyTo,
-                onClose: state.clearReplyTo,
+                message: banner,
+                isEdit: editing != null,
+                onClose: () {
+                  if (editing != null) {
+                    state.clearEditMessage();
+                  } else {
+                    state.clearReplyTo();
+                  }
+                },
               ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -440,18 +541,20 @@ class _MessageInputState extends State<MessageInput> {
                       child: TextField(
                         controller: _controller,
                         focusNode: _focusNode,
+                        inputFormatters: const [Utf16SanitizingFormatter()],
                         style: TextStyle(color: p.text1, fontSize: 15),
                         minLines: 1,
                         maxLines: 5,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _send(),
-                        // Не включаем contentInsertionConfiguration с image/*:
-                        // иначе Flutter тащит TIFF скрина в Dart и UI виснет.
-                        // Картинки: native NSEvent Cmd+V → JPEG temp.
+                        textInputAction: TextInputAction.newline,
+                        showCursor: true,
+                        cursorWidth: 2,
+                        cursorColor: p.purple,
+                        enableInteractiveSelection: true,
                         decoration: InputDecoration(
                           isCollapsed: true,
-                          hintText:
-                              replyTo == null ? 'Сообщение...' : 'Ответ...',
+                          hintText: editing != null
+                              ? 'Изменить...'
+                              : (replyTo == null ? 'Сообщение...' : 'Ответ...'),
                           hintStyle: TextStyle(color: p.text2, fontSize: 15),
                           border: InputBorder.none,
                         ),
@@ -469,7 +572,9 @@ class _MessageInputState extends State<MessageInput> {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        _hasText ? Icons.send_rounded : Icons.mic,
+                        _hasText || editing != null
+                            ? Icons.send_rounded
+                            : Icons.mic,
                         color: Colors.white,
                         size: 20,
                       ),

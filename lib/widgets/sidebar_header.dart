@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/utf16.dart';
 import 'create_chat_menu.dart';
 
 /// Шапка списка чатов: меню выбора, заголовок "Чаты", кнопка создания.
@@ -156,7 +157,7 @@ class _SearchFieldState extends State<_SearchField> {
   @override
   void initState() {
     super.initState();
-    final initial = context.read<AppState>().search;
+    final initial = sanitizeUtf16(context.read<AppState>().search);
     _controller = TextEditingController(text: initial);
     _focusNode = FocusNode();
   }
@@ -173,10 +174,11 @@ class _SearchFieldState extends State<_SearchField> {
   }
 
   void _syncFromState(String search) {
-    if (_controller.text == search) return;
+    final safe = sanitizeUtf16(search);
+    if (_controller.text == safe) return;
     _controller.value = TextEditingValue(
-      text: search,
-      selection: TextSelection.collapsed(offset: search.length),
+      text: safe,
+      selection: TextSelection.collapsed(offset: safe.length),
     );
   }
 
@@ -202,6 +204,7 @@ class _SearchFieldState extends State<_SearchField> {
         focusNode: _focusNode,
         onTap: _openRibbon,
         onChanged: context.read<AppState>().setSearch,
+        inputFormatters: const [Utf16SanitizingFormatter()],
         style: TextStyle(color: widget.palette.text1, fontSize: 15),
         textAlignVertical: TextAlignVertical.center,
         decoration: InputDecoration(

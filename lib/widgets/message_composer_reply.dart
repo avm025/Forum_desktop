@@ -10,11 +10,14 @@ import 'media_thumb_tile.dart';
 class MessageComposerReply extends StatelessWidget {
   final MessageViewModel message;
   final VoidCallback onClose;
+  /// `true` — режим редактирования (как iOS isEditMode).
+  final bool isEdit;
 
   const MessageComposerReply({
     super.key,
     required this.message,
     required this.onClose,
+    this.isEdit = false,
   });
 
   static const _height = 40.0;
@@ -27,9 +30,16 @@ class MessageComposerReply extends StatelessWidget {
     final p = context.palette;
     final me = context.watch<AppState>().profile?.id;
     final preview = message.quotedPreviewTextFor(me);
-    final name = message.quotedAuthorName.isNotEmpty
-        ? message.quotedAuthorName
-        : 'Сообщение';
+    final name = isEdit
+        ? 'Редактирование'
+        : (message.quotedAuthorName.isNotEmpty
+            ? message.quotedAuthorName
+            : 'Сообщение');
+    final bodyPreview = isEdit
+        ? (message.body.trim().isNotEmpty
+            ? message.body.trim()
+            : message.text.trim())
+        : preview;
 
     return Container(
       height: _height,
@@ -72,9 +82,9 @@ class MessageComposerReply extends StatelessWidget {
                       height: 1.15,
                     ),
                   ),
-                  if (preview.isNotEmpty)
+                  if (bodyPreview.isNotEmpty)
                     Text(
-                      preview,
+                      bodyPreview,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(

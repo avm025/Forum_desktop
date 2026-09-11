@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../api/api_config.dart';
 import '../models/media_file.dart';
 import 'media_file_loader.dart';
 
@@ -99,7 +100,10 @@ class FileOpener {
     final local = File('${dir.path}/${MediaFileLoader.displayFileName(file)}');
 
     final response = await http
-        .get(Uri.parse(file.url))
+        .get(
+          Uri.parse(file.url),
+          headers: ApiConfig.fileHeaders,
+        )
         .timeout(const Duration(seconds: 60));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return false;

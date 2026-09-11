@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart';
 
+import '../api/api_config.dart';
 import '../services/api_logger.dart';
 import 'call_models.dart';
 import 'signaling_client.dart';
@@ -632,7 +633,9 @@ class CallManager extends ChangeNotifier {
         type == 'call.canceled' ||
         type == 'call.hangup' ||
         type == 'call.ended' ||
-        type == 'call.busy') {
+        type == 'call.busy' ||
+        type == 'call.end' ||
+        type == 'end') {
       final callId = _extractCallId(map);
       final isCancel = type.contains('cancel');
       final isReject = type.contains('reject');
@@ -643,7 +646,7 @@ class CallManager extends ChangeNotifier {
         // Входящий ещё не принят: cancel инициатором → cancelled; иначе missed.
         final endedByCaller = isCancel ||
             type.contains('hangup') ||
-            type.contains('ended');
+            type.contains('end');
         _emitCallChatResult(
           CallChatResult(
             dlgId: invite.dlgId ?? invite.groupId,
@@ -660,10 +663,20 @@ class CallManager extends ChangeNotifier {
         _incoming = null;
         notifyListeners();
       }
-      if (_session != null &&
-          (callId == null ||
-              callId == _session!.callId ||
-              _session!.callId == 'pending')) {
+      if (_session != null) {
+        final sid = _session!.callId.trim();
+        final matches = callId == null ||
+            callId.isEmpty ||
+            sid.isEmpty ||
+            sid == 'pending' ||
+            callId == sid;
+        if (!matches) {
+          // Одна активная сессия — всё равно закрываем UI (иначе окно «висит»).
+          ApiLogger.instance.logEvent(
+            'CALL',
+            'end event $type callId=$callId != session=$sid — ending anyway',
+          );
+        }
         final session = _session!;
         _emitCallChatResult(
           _resultForRemoteEnd(
@@ -702,7 +715,43 @@ class CallManager extends ChangeNotifier {
     if (type == 'participant_left' ||
         type == 'call.participant_left') {
       notifyListeners();
+      // Сигнал сервера важнее задержки LiveKit: в 1:1 сразу закрываем UI.
+      _maybeEndCallIfRemoteGone(
+        reason: 'signaling_$type',
+        requireEmptyRoom: false,
+      );
+      return;
     }
+  }
+
+  /// 1:1: если remote больше нет — завершить звонок и закрыть UI.
+  void _maybeEndCallIfRemoteGone({
+    required String reason,
+    bool requireEmptyRoom = true,
+  }) {
+    if (_localEnding || _endRequested || _chatResultSent) return;
+    final session = _session;
+    if (session == null) return;
+    if (session.isGroup) return;
+    if (session.state == CallState.ended || session.state == CallState.failed) {
+      return;
+    }
+
+    if (requireEmptyRoom) {
+      final room = _room;
+      if (room != null && room.remoteParticipants.isNotEmpty) return;
+    }
+
+    ApiLogger.instance.logEvent(
+      'CALL',
+      'remote gone ($reason) — closing call UI',
+    );
+    _emitCallChatResult(
+      _resultForRemoteEnd(session, cancelledByPeer: false),
+    );
+    _endRequested = false;
+    _deferredEnd = null;
+    unawaited(hangup(local: false));
   }
 
   String? _extractCallId(Map<String, dynamic> map) {
@@ -813,14 +862,13 @@ class CallManager extends ChangeNotifier {
             _session?.callId)
         ?.toString();
 
-    if (url == null ||
-        url.isEmpty ||
-        token == null ||
-        token.isEmpty ||
-        _session == null) {
+    if (token == null || token.isEmpty || _session == null) {
       ApiLogger.instance.logEvent('CALL', 'call.token incomplete');
       return;
     }
+    final liveKitUrl = (url == null || url.isEmpty)
+        ? ApiConfig.liveKitWs
+        : ApiConfig.resolveLiveKitUrl(url);
 
     if (_endRequested) {
       _flushDeferredEndIfNeeded(callId);
@@ -849,7 +897,7 @@ class CallManager extends ChangeNotifier {
 
     _session = _session!.copyWith(
       state: CallState.connectingMedia,
-      livekitUrl: url,
+      livekitUrl: liveKitUrl,
       livekitToken: token,
       livekitRoom: roomName,
       e2eeEnabled: e2ee && e2eeKey != null,
@@ -918,12 +966,18 @@ class CallManager extends ChangeNotifier {
           _markRemoteAccepted();
           notifyListeners();
         })
-        ..on<ParticipantDisconnectedEvent>((_) => notifyListeners())
+        ..on<ParticipantDisconnectedEvent>((_) {
+          notifyListeners();
+          // Карта remote может обновиться чуть позже события.
+          scheduleMicrotask(() {
+            _maybeEndCallIfRemoteGone(reason: 'livekit_participant_left');
+          });
+        })
         ..on<TrackSubscribedEvent>((_) => notifyListeners())
         ..on<TrackUnsubscribedEvent>((_) => notifyListeners())
         ..on<LocalTrackPublishedEvent>((_) => notifyListeners());
 
-      await room.connect(url, token);
+      await room.connect(liveKitUrl, token);
 
       if (_endRequested || _session == null) {
         await _leaveRoom();

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -23,6 +24,7 @@ import 'location_preview.dart';
 import 'media_grid.dart';
 import '../utils/attachment_selection.dart';
 import '../utils/chat_message_search.dart';
+import '../utils/file_saver.dart';
 import '../utils/media_display_name.dart';
 import '../utils/media_message_layout.dart';
 import '../utils/media_file_loader.dart';
@@ -30,11 +32,13 @@ import '../utils/media_file_url.dart';
 import 'file_row_tile.dart';
 import 'message_actions_bar.dart';
 import 'message_status_list_sheet.dart';
+import 'pin_message_dialog.dart';
 import 'reply_preview.dart';
 import 'status_ticks.dart';
 import 'voice_message.dart';
 
-/// Сообщение в ленте: свои справа (фиолетовый пузырь), чужие слева (серый).
+/// Сообщение в ленте: все сообщения слева.
+/// В группе — имя и аватар отправителя сверху сообщения.
 class MessageItem extends StatefulWidget {
   final MessageViewModel message;
   final bool isGroupChat;
@@ -58,6 +62,9 @@ class MessageItem extends StatefulWidget {
 
 class _MessageItemState extends State<MessageItem> {
   final GlobalKey _bubbleKey = GlobalKey();
+  final GlobalKey<LocationPreviewState> _geoKey =
+      GlobalKey<LocationPreviewState>();
+  List<MediaFile> _selectedAttachments = const [];
 
   MessageViewModel get message => widget.message;
   bool get _isMine => message.my;
@@ -66,22 +73,15 @@ class _MessageItemState extends State<MessageItem> {
 
   static const double _avatarSize = 32;
   static const double _avatarGap = 8;
+  static const double _headerGap = 6;
   static const double _bubbleRadius = 14;
   static const double _bubbleRadiusSmall = 4;
   static const double _maxBubbleFraction = 0.88;
   static const double _maxBubbleWidthCap = 980;
 
-
-  double _leadingWidth(bool showAvatar, bool continuationIndent) {
-    if (_isMine || !widget.isGroupChat) return 0;
-    if (showAvatar || continuationIndent) return _avatarSize + _avatarGap;
-    return 0;
-  }
-
-  double _bubbleMaxWidth(double rowWidth, double leadingWidth) {
-    final available = rowWidth - leadingWidth;
+  double _bubbleMaxWidth(double rowWidth) {
     final cap = (rowWidth * _maxBubbleFraction).clamp(120.0, _maxBubbleWidthCap);
-    return available.clamp(120.0, cap);
+    return rowWidth.clamp(120.0, cap);
   }
 
   /// Текст подписи в пузыре. Для file/media не подставляем сырой JSON
@@ -122,25 +122,56 @@ class _MessageItemState extends State<MessageItem> {
   Widget build(BuildContext context) {
     final p = context.palette;
     final state = context.watch<AppState>();
-    final onAccent = _isMine;
-    final bubblePadding = _bubblePadding();
+    final useBubbles = state.appearance.messageBubbles;
+    final onAccent = _isMine && useBubbles;
+    final bubblePadding = useBubbles
+        ? _bubblePadding()
+        : const EdgeInsets.fromLTRB(2, 2, 2, 2);
 
-    final showAvatar = widget.isGroupChat && !_isMine && _clusterTop;
-    final continuationIndent = widget.isGroupChat && !_isMine && !_clusterTop;
-    final leadingWidth = _leadingWidth(showAvatar, continuationIndent);
+    final showHeader = message.showUserName;
+    final senderName = _senderDisplayName(state);
+    final senderAvatarUrl = _senderAvatarUrl(state);
 
     return Padding(
       padding: EdgeInsets.only(
-        left: 8,
-        right: 8,
-        top: _clusterTop ? 6 : 2,
-        bottom: _clusterBottom ? 6 : 2,
+        left: 12,
+        right: 12,
+        top: _clusterTop ? 8 : 2,
+        bottom: _clusterBottom ? 8 : 2,
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final maxBubbleWidth =
-              _bubbleMaxWidth(constraints.maxWidth, leadingWidth);
+          final maxBubbleWidth = _bubbleMaxWidth(constraints.maxWidth);
           final innerMaxWidth = maxBubbleWidth - bubblePadding.horizontal;
+
+          final bubbleChild = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (message.hasReply)
+                ReplyPreview(
+                  message: message,
+                  onAccent: onAccent,
+                  maxWidth: innerMaxWidth,
+                  currentUserId: state.profile?.id,
+                  onTap: message.prn_id.trim().isNotEmpty
+                      ? () => ChatScrollScope.maybeOf(context)
+                          ?.scrollToMessage(message.prn_id)
+                      : null,
+                ),
+              _content(context, p, onAccent, innerMaxWidth),
+              if (message.hasReactions)
+                EmojiReactions(
+                  reactions: message.emoji,
+                  currentUserName: state.profile?.name ?? '',
+                  currentUserId: state.profile?.id ?? '',
+                  onAccent: onAccent,
+                  onReactionTap: _canReact ? _onReactionTap : null,
+                ),
+              if (!_isPlainTextOnly)
+                _footer(p, onAccent, alignEnd: _useWideFooter),
+            ],
+          );
 
           final bubble = GestureDetector(
             key: _bubbleKey,
@@ -151,7 +182,6 @@ class _MessageItemState extends State<MessageItem> {
                 _callbackFromCallMessage(context);
                 return;
               }
-              // ЛКМ меню не открывает — только закрывает, если уже открыто.
               final menu = MessageContextMenuController.instance;
               if (menu.isOpenFor(_bubbleKey)) {
                 menu.handleBubbleTap(_bubbleKey);
@@ -164,87 +194,73 @@ class _MessageItemState extends State<MessageItem> {
             child: _Bubble(
               maxWidth: maxBubbleWidth,
               borderRadius: _bubbleBorderRadius(),
-              color: onAccent ? p.outgoingBubble : p.bg3,
-              liquidGlass: state.appearance.liquidGlass,
+              color: useBubbles
+                  ? (onAccent ? p.outgoingBubble : p.bg3)
+                  : Colors.transparent,
+              liquidGlass: useBubbles && state.appearance.liquidGlass,
               opacity: state.appearance.panelOpacity,
               padding: bubblePadding,
               highlightBorder: widget.searchHighlightCurrent,
               highlightColor: onAccent ? p.lime : p.purple,
+              flat: !useBubbles,
+              child: bubbleChild,
+            ),
+          );
+
+          return Align(
+            alignment: Alignment.centerLeft,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxBubbleWidth),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (message.showUserName && !_isMine)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(
-                        message.fr_name,
-                        style: TextStyle(
-                          color: state.nameColor(isDark: state.isDark),
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                  if (showHeader) ...[
+                    _SenderHeader(
+                      name: senderName,
+                      avatarUrl: senderAvatarUrl,
+                      avatarColor: _isMine
+                          ? state.currentUserAvatarHex(isDark: state.isDark)
+                          : state.selectedDialog?.avatarColor,
+                      colAvaId: _isMine
+                          ? state.appearance.avatarColorId
+                          : (state.selectedDialog?.colAvaId ?? 1),
+                      nameColor: state.nameColor(isDark: state.isDark),
+                      avatarSize: _avatarSize,
+                      gap: _avatarGap,
                     ),
-                  if (message.hasReply)
-                    ReplyPreview(
-                      message: message,
-                      onAccent: onAccent,
-                      maxWidth: innerMaxWidth,
-                      currentUserId: state.profile?.id,
-                      onTap: message.prn_id.trim().isNotEmpty
-                          ? () => ChatScrollScope.maybeOf(context)
-                              ?.scrollToMessage(message.prn_id)
-                          : null,
-                    ),
-                  _content(context, p, onAccent, innerMaxWidth),
-                  if (message.hasReactions)
-                    EmojiReactions(
-                      reactions: message.emoji,
-                      currentUserName: state.profile?.name ?? '',
-                      currentUserId: state.profile?.id ?? '',
-                      onAccent: onAccent,
-                      onReactionTap: _canReact ? _onReactionTap : null,
-                    ),
-                  if (!_isPlainTextOnly)
-                    _footer(p, onAccent, alignEnd: _useWideFooter),
+                    const SizedBox(height: _headerGap),
+                  ],
+                  bubble,
                 ],
               ),
             ),
           );
-
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisAlignment:
-                _isMine ? MainAxisAlignment.end : MainAxisAlignment.start,
-            children: [
-              if (!_isMine) ...[
-                if (showAvatar) ...[
-                  AvatarWidget(
-                    name: message.fr_name,
-                    avatarUrl: message.preview,
-                    size: _avatarSize,
-                  ),
-                  const SizedBox(width: _avatarGap),
-                ] else if (continuationIndent)
-                  const SizedBox(width: _avatarSize + _avatarGap),
-              ],
-              Flexible(
-                fit: FlexFit.loose,
-                child: Align(
-                  alignment:
-                      _isMine ? Alignment.centerRight : Alignment.centerLeft,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-                    child: bubble,
-                  ),
-                ),
-              ),
-            ],
-          );
         },
       ),
     );
+  }
+
+  String _senderDisplayName(AppState state) {
+    if (_isMine) {
+      final me = state.profile?.name.trim() ?? '';
+      if (me.isNotEmpty) return me;
+    }
+    final name = message.fr_name.trim();
+    if (name.isNotEmpty) return name;
+    // В личном чате имя собеседника часто только в карточке диалога.
+    final peer = state.selectedDialog?.chatName.trim() ?? '';
+    return peer.isNotEmpty ? peer : 'Пользователь';
+  }
+
+  String _senderAvatarUrl(AppState state) {
+    if (_isMine) {
+      return state.profile?.displayAvatarUrl.trim() ?? '';
+    }
+    final fromMsg = message.preview.trim();
+    if (fromMsg.isNotEmpty) return fromMsg;
+    // Личный чат / пустой preview у media|voice|file — аватар из карточки диалога.
+    return state.selectedDialog?.avatar.trim() ?? '';
   }
 
   bool get _useWideFooter =>
@@ -255,22 +271,15 @@ class _MessageItemState extends State<MessageItem> {
       message.isFile;
 
   BorderRadius _bubbleBorderRadius() {
-    if (_isMine) {
-      return BorderRadius.only(
-        topLeft: const Radius.circular(_bubbleRadius),
-        topRight: Radius.circular(
-          _clusterTop ? _bubbleRadius : _bubbleRadiusSmall,
-        ),
-        bottomLeft: const Radius.circular(_bubbleRadius),
-        bottomRight: const Radius.circular(_bubbleRadiusSmall),
-      );
-    }
+    // Все сообщения слева: «хвост» у нижнего левого угла кластера.
     return BorderRadius.only(
       topLeft: Radius.circular(
         _clusterTop ? _bubbleRadius : _bubbleRadiusSmall,
       ),
       topRight: const Radius.circular(_bubbleRadius),
-      bottomLeft: const Radius.circular(_bubbleRadiusSmall),
+      bottomLeft: Radius.circular(
+        _clusterBottom ? _bubbleRadius : _bubbleRadiusSmall,
+      ),
       bottomRight: const Radius.circular(_bubbleRadius),
     );
   }
@@ -284,9 +293,6 @@ class _MessageItemState extends State<MessageItem> {
     }
     return const EdgeInsets.fromLTRB(10, 8, 10, 6);
   }
-
-  bool get _canOpen =>
-      message.isFile || (message.isImage && message.hasFiles);
 
   bool get _canReact => MsgListCursors.isSavedMessage(message);
 
@@ -309,13 +315,129 @@ class _MessageItemState extends State<MessageItem> {
   }
 
   Future<void> _openFile(BuildContext context, MediaFile file) async {
+    try {
+      await MediaFileLoader.ensureCached(
+        file,
+        downloadUrl: MediaFileUrl.resolve(file),
+      );
+    } catch (_) {}
+    if (!context.mounted) return;
     await ChatAttachmentViewer.show(context, file);
   }
 
   void _onMediaSelectionChanged(List<MediaFile> selected) {
+    _selectedAttachments = List<MediaFile>.from(selected);
     // ЛКМ только выделяет; меню — по ПКМ. Пустое выделение закрывает меню.
     if (selected.isEmpty) {
       MessageContextMenuController.instance.closeIfOpenFor(_bubbleKey);
+    }
+  }
+
+  bool get _canSaveAsCandidate {
+    if (message.isCall) return false;
+    if (message.isLocation &&
+        message.latitude != null &&
+        message.longitude != null) {
+      return true;
+    }
+    return message.files.isNotEmpty ||
+        ((message.isImage || message.isFile) &&
+            ((message.fileTitle ?? '').trim().isNotEmpty ||
+                message.url.trim().isNotEmpty ||
+                message.fdir.trim().isNotEmpty));
+  }
+
+  List<MediaFile> _filesForSave() {
+    if (_selectedAttachments.isNotEmpty) {
+      return List<MediaFile>.from(_selectedAttachments);
+    }
+    if (message.files.isNotEmpty) {
+      return List<MediaFile>.from(message.files);
+    }
+    // Legacy single-file message without files[].
+    return [_legacyMediaFile()];
+  }
+
+  /// Как у картинок: достаточно URL или локальной копии (в т.ч. пересланные).
+  Future<bool> _isSaveableAttachment(MediaFile file) async {
+    if (await MediaFileLoader.isDownloaded(file)) return true;
+    final url = MediaFileUrl.resolve(file);
+    return url.trim().isNotEmpty;
+  }
+
+  Future<List<MediaFile>> _downloadedFilesForSave() async {
+    final out = <MediaFile>[];
+    for (final file in _filesForSave()) {
+      if (await _isSaveableAttachment(file)) {
+        out.add(file);
+      }
+    }
+    return out;
+  }
+
+  Future<void> _saveAs() async {
+    if (message.isLocation) {
+      await _saveGeoPreview();
+      return;
+    }
+
+    final files = await _downloadedFilesForSave();
+    if (files.isEmpty || !mounted) return;
+
+    var saved = 0;
+    var failed = 0;
+    for (final file in files) {
+      final result = await FileSaver.save(file);
+      if (result == FileSaveResult.saved) {
+        saved++;
+      } else if (result == FileSaveResult.failed) {
+        failed++;
+      } else {
+        // cancelled — прерываем серию
+        break;
+      }
+    }
+    if (!mounted) return;
+    if (saved == 0 && failed == 0) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (failed > 0 && saved == 0) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Не удалось сохранить файл')),
+      );
+    } else if (saved > 0) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            saved == 1 ? 'Файл сохранён' : 'Сохранено файлов: $saved',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _saveGeoPreview() async {
+    final geo = _geoKey.currentState;
+    final png = await geo?.captureMapPng();
+    if (png == null || png.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось сохранить карту')),
+      );
+      return;
+    }
+    final result = await FileSaver.saveBytes(
+      bytes: png,
+      fileName: 'map.png',
+    );
+    if (!mounted) return;
+    if (result == FileSaveResult.saved) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Файл сохранён')),
+      );
+    } else if (result == FileSaveResult.failed) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось сохранить файл')),
+      );
     }
   }
 
@@ -323,12 +445,17 @@ class _MessageItemState extends State<MessageItem> {
     unawaited(_showActions(globalPosition: globalPosition));
   }
 
-  /// Документы: открытие только если файл уже загружен («Загрузить»).
-  Future<void> _openDocumentIfDownloaded(
+  /// Открытие вложения: докачать при необходимости (как картинки/видео).
+  Future<void> _openAttachment(
     BuildContext context,
     MediaFile file,
   ) async {
-    if (!await MediaFileLoader.isDownloaded(file)) return;
+    try {
+      await MediaFileLoader.ensureCached(
+        file,
+        downloadUrl: MediaFileUrl.resolve(file),
+      );
+    } catch (_) {}
     if (!context.mounted) return;
     await ChatAttachmentViewer.show(context, file);
   }
@@ -381,6 +508,13 @@ class _MessageItemState extends State<MessageItem> {
         msgId != null &&
         dlgId.isNotEmpty &&
         dlgId != '0';
+    final canPin = msgId != null && dlgId.isNotEmpty && dlgId != '0';
+    final pinned = canPin && appState.isMessagePinned(dlgId, msgId);
+    final canSaveAs = message.isLocation
+        ? _canSaveAsCandidate
+        : (_canSaveAsCandidate &&
+            (await _downloadedFilesForSave()).isNotEmpty);
+    if (!mounted) return;
 
     await showMessageActions(
       context: context,
@@ -390,23 +524,75 @@ class _MessageItemState extends State<MessageItem> {
           ? const []
           : appState.quickReactions,
       onReaction: message.isCall || !_canReact ? null : _pickReaction,
-      onCall: message.isCall
-          ? () => _callbackFromCallMessage(context)
-          : null,
       onReply: () => appState.setReplyTo(message),
       onForward: message.isCall
           ? null
           : (ForwardMapper.canForward(message)
               ? () => _forward(context)
               : null),
+      onEdit: message.my &&
+              !message.isCall &&
+              appState.canEditMessage(message)
+          ? () => appState.setEditMessage(message)
+          : null,
       onCopy: copyText == null
           ? null
           : () => Clipboard.setData(ClipboardData(text: copyText)),
-      onOpen: message.isCall
+      onSaveAs: canSaveAs ? () => unawaited(_saveAs()) : null,
+      onFavorite: message.isCall
           ? null
-          : (_canOpen && message.files.isNotEmpty
-              ? () => _openFile(context, message.files.first)
-              : null),
+          : () async {
+              try {
+                await appState.sendToFavorites(message);
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Добавлено в избранное')),
+                );
+              } catch (e) {
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      e.toString().replaceFirst(RegExp(r'^[^:]+:\s*'), ''),
+                    ),
+                  ),
+                );
+              }
+            },
+      onSelect: null, // как iOS — пункт есть, но disabled
+      onPin: canPin
+          ? () async {
+              final peerName = dialog?.chatName.trim();
+              final result = pinned
+                  ? await showUnpinMessageDialog(
+                      context: context,
+                      isGroupChat: isGroup,
+                      peerName: peerName,
+                    )
+                  : await showPinMessageDialog(
+                      context: context,
+                      isGroupChat: isGroup,
+                      peerName: peerName,
+                    );
+              if (result == null || !mounted) return;
+              try {
+                await appState.togglePinMessage(
+                  message,
+                  forBoth: result.forBoth,
+                );
+              } catch (e) {
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      e.toString().replaceFirst(RegExp(r'^[^:]+:\s*'), ''),
+                    ),
+                  ),
+                );
+              }
+            }
+          : null,
+      isPinned: pinned,
       onDelete: () => _confirmDelete(context),
       readViews: showViews
           ? MsgReadViewsConfig(
@@ -497,7 +683,12 @@ class _MessageItemState extends State<MessageItem> {
       return VoiceMessage(message: message, onAccent: onAccent);
     }
     if (message.isLocation) {
-      return LocationPreview(message: message);
+      return LocationPreview(
+        key: _geoKey,
+        message: message,
+        maxWidth: innerMaxWidth,
+        onContextMenu: _onAttachmentContextMenu,
+      );
     }
     if (message.isImage && message.hasFiles) {
       return Column(
@@ -515,7 +706,8 @@ class _MessageItemState extends State<MessageItem> {
           if (_hasText)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: _textWithFooter(p, onAccent, innerMaxWidth),
+              // Подпись; «изменено» + дата — в футере ниже, как в Telegram.
+              child: _text(p, onAccent, innerMaxWidth),
             ),
         ],
       );
@@ -544,12 +736,11 @@ class _MessageItemState extends State<MessageItem> {
       files: files,
       onAccent: onAccent,
       maxWidth: innerMaxWidth,
-      onOpen: (file) => _openDocumentIfDownloaded(context, file),
+      onOpen: (file) => _openAttachment(context, file),
       onSelectionChanged: _onMediaSelectionChanged,
       onContextMenu: _onAttachmentContextMenu,
-      footer: _hasText
-          ? _textWithFooter(p, onAccent, innerMaxWidth)
-          : null,
+      // Подпись; «изменено» + дата — в футере пузыря ниже.
+      footer: _hasText ? _text(p, onAccent, innerMaxWidth) : null,
     );
   }
 
@@ -567,6 +758,7 @@ class _MessageItemState extends State<MessageItem> {
         searchQuery: widget.searchQuery,
         highlightColor: onAccent ? p.lime.withValues(alpha: 0.45) : p.purple.withValues(alpha: 0.35),
         onSimpleTap: _onTextSimpleTap,
+        onSecondaryTap: (pos) => unawaited(_showActions(globalPosition: pos)),
       ),
     );
   }
@@ -586,6 +778,7 @@ class _MessageItemState extends State<MessageItem> {
         highlightColor: onAccent ? p.lime.withValues(alpha: 0.45) : p.purple.withValues(alpha: 0.35),
         footer: _footerMeta(p, onAccent),
         onSimpleTap: _onTextSimpleTap,
+        onSecondaryTap: (pos) => unawaited(_showActions(globalPosition: pos)),
       ),
     );
   }
@@ -623,6 +816,7 @@ class _MessageItemState extends State<MessageItem> {
     final timeColor = onAccent ? Colors.white70 : p.text2;
     final tickColor = onAccent ? Colors.white70 : p.text2;
     final readTickColor = onAccent ? p.lime : p.lime;
+    final edited = message.isEdited;
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -633,6 +827,17 @@ class _MessageItemState extends State<MessageItem> {
             size: 14,
             color: tickColor,
             readColor: readTickColor,
+          ),
+          const SizedBox(width: 4),
+        ],
+        if (edited) ...[
+          Text(
+            'изменено',
+            style: TextStyle(
+              color: timeColor,
+              fontSize: 11,
+              fontStyle: FontStyle.italic,
+            ),
           ),
           const SizedBox(width: 4),
         ],
@@ -650,7 +855,7 @@ class _MessageItemState extends State<MessageItem> {
       file: file,
       onAccent: onAccent,
       maxWidth: 260,
-      onTap: () => _openDocumentIfDownloaded(context, file),
+      onTap: () => _openAttachment(context, file),
     );
   }
 }
@@ -665,6 +870,7 @@ class _Bubble extends StatelessWidget {
   final double opacity;
   final bool highlightBorder;
   final Color? highlightColor;
+  final bool flat;
 
   const _Bubble({
     required this.maxWidth,
@@ -676,10 +882,31 @@ class _Bubble extends StatelessWidget {
     this.opacity = 1,
     this.highlightBorder = false,
     this.highlightColor,
+    this.flat = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (flat) {
+      Widget content = Padding(
+        padding: padding,
+        child: child,
+      );
+      if (highlightBorder && highlightColor != null) {
+        content = DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border.all(color: highlightColor!, width: 2),
+            borderRadius: borderRadius,
+          ),
+          child: content,
+        );
+      }
+      return ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: IntrinsicWidth(child: content),
+      );
+    }
+
     final fill = color.withValues(alpha: liquidGlass ? opacity : 1.0);
     Widget bubble = DecoratedBox(
       decoration: BoxDecoration(
@@ -721,8 +948,58 @@ class _Bubble extends StatelessWidget {
   }
 }
 
-/// Текст сообщения: тап открывает меню действий, drag — выделение без
-/// системного toolbar/copy popup. ⌘C / Ctrl+C при выделении работают.
+class _SenderHeader extends StatelessWidget {
+  final String name;
+  final String avatarUrl;
+  final List<String>? avatarColor;
+  final int colAvaId;
+  final Color nameColor;
+  final double avatarSize;
+  final double gap;
+
+  const _SenderHeader({
+    required this.name,
+    required this.avatarUrl,
+    required this.nameColor,
+    required this.avatarSize,
+    required this.gap,
+    this.avatarColor,
+    this.colAvaId = 1,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AvatarWidget(
+          name: name,
+          avatarUrl: avatarUrl,
+          avatarColor: avatarColor,
+          colAvaId: colAvaId,
+          size: avatarSize,
+        ),
+        SizedBox(width: gap),
+        Flexible(
+          child: Text(
+            name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: nameColor,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Текст сообщения: drag — выделение без системного toolbar.
+/// ПКМ / простой тап обрабатываются отдельно (SelectableText глотает secondary).
 class _MessageBodyText extends StatefulWidget {
   final String text;
   final TextStyle style;
@@ -730,6 +1007,7 @@ class _MessageBodyText extends StatefulWidget {
   final String? searchQuery;
   final Color? highlightColor;
   final VoidCallback onSimpleTap;
+  final void Function(Offset globalPosition) onSecondaryTap;
 
   const _MessageBodyText({
     required this.text,
@@ -738,6 +1016,7 @@ class _MessageBodyText extends StatefulWidget {
     this.searchQuery,
     this.highlightColor,
     required this.onSimpleTap,
+    required this.onSecondaryTap,
   });
 
   @override
@@ -749,10 +1028,16 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
 
   Offset? _downGlobal;
   bool _dragged = false;
+  bool _secondary = false;
 
   void _onPointerDown(PointerDownEvent e) {
     _downGlobal = e.position;
     _dragged = false;
+    _secondary = e.buttons == kSecondaryMouseButton;
+    if (_secondary) {
+      // SelectableText перехватывает GestureDetector.onSecondaryTapUp.
+      widget.onSecondaryTap(e.position);
+    }
   }
 
   void _onPointerMove(PointerMoveEvent e) {
@@ -765,10 +1050,12 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
 
   void _onPointerUp(PointerUpEvent e) {
     final wasDrag = _dragged;
+    final wasSecondary = _secondary;
     _downGlobal = null;
     _dragged = false;
-    // Простой тап (без выделения) — меню как у медиа.
-    if (!wasDrag) {
+    _secondary = false;
+    // ЛКМ без drag — закрытие открытого меню; ПКМ уже обработан в down.
+    if (!wasDrag && !wasSecondary) {
       widget.onSimpleTap();
     }
   }
@@ -776,6 +1063,7 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
   void _onPointerCancel(PointerCancelEvent e) {
     _downGlobal = null;
     _dragged = false;
+    _secondary = false;
   }
 
   Widget _buildVisibleText() {
@@ -805,40 +1093,42 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
 
   @override
   Widget build(BuildContext context) {
+    final textStack = Stack(
+      children: [
+        _buildVisibleText(),
+        SelectableText(
+          widget.text,
+          style: widget.style.copyWith(color: Colors.transparent),
+          selectionColor: (widget.style.color ?? Colors.white)
+              .withValues(alpha: 0.35),
+          contextMenuBuilder: (context, editableTextState) =>
+              const SizedBox.shrink(),
+          magnifierConfiguration: TextMagnifierConfiguration.disabled,
+        ),
+      ],
+    );
+
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onPointerDown,
       onPointerMove: _onPointerMove,
       onPointerUp: _onPointerUp,
       onPointerCancel: _onPointerCancel,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Stack(
-            children: [
-              _buildVisibleText(),
-              SelectableText(
-                widget.text,
-                style: widget.style.copyWith(color: Colors.transparent),
-                selectionColor: (widget.style.color ?? Colors.white)
-                    .withValues(alpha: 0.35),
-                contextMenuBuilder: (context, editableTextState) =>
-                    const SizedBox.shrink(),
-                magnifierConfiguration: TextMagnifierConfiguration.disabled,
-              ),
-            ],
-          ),
-          if (widget.footer != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: widget.footer,
-              ),
+      // Как в Telegram: мета («изменено» + дата) под текстом справа.
+      child: widget.footer == null
+          ? textStack
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                textStack,
+                const SizedBox(height: 2),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: widget.footer,
+                ),
+              ],
             ),
-        ],
-      ),
     );
   }
 }

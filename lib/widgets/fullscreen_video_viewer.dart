@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/media_file.dart';
+import '../services/media_thumb_cache.dart';
 import '../utils/media_display_name.dart';
 import '../utils/media_file_loader.dart';
+import '../utils/media_file_url.dart';
 
 /// Воспроизведение видео из чата.
 class FullscreenVideoViewer extends StatefulWidget {
@@ -38,28 +40,28 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
 
   Future<void> _initPlayer() async {
     try {
-      final source = await MediaFileLoader.resolve(widget.file);
-      final VideoPlayerController controller;
-      if (source.hasLocalPath) {
-        controller = VideoPlayerController.file(File(source.localPath!));
-      } else if (source.networkUrl.isNotEmpty) {
-        controller = VideoPlayerController.networkUrl(
-          Uri.parse(source.networkUrl),
-        );
-      } else {
-        throw StateError('Нет источника видео');
+      final downloadUrl = MediaFileUrl.resolve(widget.file);
+      final localPath = await MediaFileLoader.ensureCached(
+        widget.file,
+        downloadUrl: downloadUrl,
+      );
+      final file = File(localPath);
+      if (!await file.exists() || await file.length() <= 0) {
+        throw StateError('Локальный файл пуст');
       }
 
+      final controller = VideoPlayerController.file(file);
       await controller.initialize();
       if (!mounted) {
         controller.dispose();
         return;
       }
+      controller.addListener(_onTick);
       setState(() {
         _controller = controller;
         _loading = false;
       });
-      controller.play();
+      await controller.play();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -69,8 +71,13 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
     }
   }
 
+  void _onTick() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _controller?.removeListener(_onTick);
     _controller?.dispose();
     super.dispose();
   }
@@ -127,26 +134,32 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
   }
 
   Widget _body() {
+    final thumb = MediaThumbCache.peekSync(widget.file);
     if (_loading) {
-      return const Padding(
-        padding: EdgeInsets.all(48),
-        child: CircularProgressIndicator(color: Colors.white),
-      );
+      if (thumb != null) {
+        return Image.file(
+          thumb,
+          fit: BoxFit.contain,
+          gaplessPlayback: true,
+        );
+      }
+      return const SizedBox.shrink();
     }
     if (_error != null) {
       return Padding(
         padding: const EdgeInsets.all(24),
         child: Text(
-          'Не удалось загрузить видео',
-          style: const TextStyle(color: Colors.white70),
+          'Не удалось загрузить видео\n$_error',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
           textAlign: TextAlign.center,
         ),
       );
     }
 
     final c = _controller!;
+    final ratio = c.value.aspectRatio == 0 ? (16 / 9) : c.value.aspectRatio;
     return AspectRatio(
-      aspectRatio: c.value.aspectRatio,
+      aspectRatio: ratio,
       child: VideoPlayer(c),
     );
   }

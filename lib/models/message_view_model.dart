@@ -62,6 +62,12 @@ class MessageViewModel {
   double? longitude;
   String? address;
 
+  /// Идёт live-трансляция (`geotr` с `live != 0`).
+  bool locationLive;
+
+  /// Локально помечено как отредактированное (до прихода `dttmup` с сервера).
+  bool editedLocal;
+
   MessageViewModel({
     required this.id,
     required this.type,
@@ -102,9 +108,21 @@ class MessageViewModel {
     this.latitude,
     this.longitude,
     this.address,
+    this.locationLive = false,
+    this.editedLocal = false,
   })  : files = files ?? <MediaFile>[],
         voiceHistogram = voiceHistogram ?? <int>[],
         emoji = emoji ?? <MessageEmojiModel>[];
+
+  /// Сообщение было отредактировано (`dttmup` ≠ `dttmcr` или локальный флаг).
+  bool get isEdited {
+    if (editedLocal) return true;
+    final up = dttmup.trim();
+    final cr = dttmcr.trim();
+    if (up.isEmpty) return false;
+    if (cr.isEmpty) return true;
+    return up != cr;
+  }
 
   bool get hasReply => prn_id.trim().isNotEmpty;
 
@@ -128,7 +146,10 @@ class MessageViewModel {
         }
         return content.isNotEmpty ? content : 'Файл';
       case 'geo':
-        return content.isNotEmpty ? 'Геопозиция: $content' : 'Геопозиция';
+      case 'location':
+        final adrs = (address ?? '').trim();
+        final place = adrs.isNotEmpty ? adrs : content;
+        return place.isNotEmpty ? 'Геопозиция: $place' : 'Геопозиция';
       case 'media':
       case 'img':
       case 'image':
@@ -187,6 +208,7 @@ class MessageViewModel {
         }
         return body.isNotEmpty ? body : 'Файл';
       case 'geo':
+      case 'location':
         return body.isNotEmpty ? 'Геопозиция: $body' : 'Геопозиция';
       case 'media':
       case 'img':
@@ -221,8 +243,10 @@ class MessageViewModel {
       type == 'img' ||
       type == 'video';
   bool get isFile => type == 'file';
-  bool get isLocation =>
-      type == 'location' || type == 'geo' || hasLocation;
+  bool get isLocation {
+    final t = type.toLowerCase();
+    return t == 'location' || t == 'geo' || hasLocation;
+  }
   bool get isCall => type.toLowerCase() == 'call';
 
   CallMessageBody? get callBody =>

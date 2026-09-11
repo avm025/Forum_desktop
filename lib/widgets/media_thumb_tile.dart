@@ -40,7 +40,23 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
   void initState() {
     super.initState();
     _cachedFile = MediaThumbCache.peekSync(widget.file);
+    // До первого кадра: если кэша нет — сразу blank, без градиента/иконки.
+    if (_cachedFile == null && _needsAsyncLoad) {
+      _loading = true;
+    }
     _load();
+  }
+
+  bool get _needsAsyncLoad {
+    final localPath = widget.file.URL?.trim() ?? '';
+    final hasLocal = localPath.isNotEmpty &&
+        !localPath.startsWith('http') &&
+        File(localPath).existsSync();
+    final smallBytes = widget.file.bytes != null &&
+        widget.file.bytes!.isNotEmpty &&
+        widget.file.bytes!.length < 2 * 1024 * 1024;
+    if (hasLocal || smallBytes) return false;
+    return MediaThumbCache.needsRemoteThumbnail(widget.file);
   }
 
   @override
@@ -54,7 +70,7 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         oldWidget.file.bytes != widget.file.bytes) {
       _cachedFile = MediaThumbCache.peekSync(widget.file);
       _error = false;
-      _loading = false;
+      _loading = _cachedFile == null && _needsAsyncLoad;
       _load();
     } else if (sizeChanged && mounted) {
       setState(() {});
@@ -88,11 +104,16 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
 
     final existing = await MediaThumbCache.getIfExists(widget.file);
     if (existing != null) {
-      if (mounted) setState(() => _cachedFile = existing);
+      if (mounted) {
+        setState(() {
+          _cachedFile = existing;
+          _loading = false;
+        });
+      }
       return;
     }
 
-    if (mounted) setState(() => _loading = true);
+    if (mounted && !_loading) setState(() => _loading = true);
 
     try {
       final file = await MediaThumbCache.ensureThumbnail(widget.file);
@@ -137,6 +158,7 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         cacheWidth: cw,
         cacheHeight: ch,
         filterQuality: FilterQuality.low,
+        frameBuilder: _frameBuilder,
       );
     }
 
@@ -155,6 +177,7 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
           cacheWidth: cw,
           cacheHeight: ch,
           filterQuality: FilterQuality.low,
+          frameBuilder: _frameBuilder,
           errorBuilder: (_, __, ___) => _placeholder(w, h, error: true),
         );
       }
@@ -171,28 +194,38 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         cacheWidth: cw,
         cacheHeight: ch,
         filterQuality: FilterQuality.low,
+        frameBuilder: _frameBuilder,
       );
-    }
-
-    if (_loading) {
-      return _placeholder(w, h);
     }
 
     if (_error) {
       return _placeholder(w, h, error: true);
     }
 
-    return _placeholder(w, h);
+    // Загрузка / ожидание — нейтральный фон, без градиента и иконки.
+    return _blank(w, h);
+  }
+
+  Widget _frameBuilder(
+    BuildContext context,
+    Widget child,
+    int? frame,
+    bool wasSynchronouslyLoaded,
+  ) {
+    if (wasSynchronouslyLoaded || frame != null) return child;
+    return _blank(widget.width, widget.height);
+  }
+
+  Widget _blank(double w, double h) {
+    return SizedBox(
+      width: w,
+      height: h,
+      child: const ColoredBox(color: Color(0x22000000)),
+    );
   }
 
   Widget _placeholder(double w, double h, {bool error = false}) {
-    if (widget.blankWhileLoading && !error) {
-      return SizedBox(
-        width: w,
-        height: h,
-        child: const ColoredBox(color: Color(0x22000000)),
-      );
-    }
+    if (!error) return _blank(w, h);
     final media = widget.file;
     final gradient = AppColors.avatarGradientFor(
       media.hash.isNotEmpty ? media.hash : media.url,
@@ -208,24 +241,11 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         ),
       ),
       alignment: Alignment.center,
-      child: _loading
-          ? const SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Colors.white54,
-              ),
-            )
-          : Icon(
-              error
-                  ? Icons.broken_image_outlined
-                  : (media.isVideo
-                      ? Icons.videocam_outlined
-                      : Icons.image_outlined),
-              color: Colors.white54,
-              size: 40,
-            ),
+      child: const Icon(
+        Icons.broken_image_outlined,
+        color: Colors.white54,
+        size: 40,
+      ),
     );
   }
 }

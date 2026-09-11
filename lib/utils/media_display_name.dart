@@ -102,29 +102,100 @@ class MediaDisplayName {
     );
   }
 
-  /// Имя для сохранения на диск (с расширением из fname/title, если его нет).
+  /// Имя для сохранения на диск (с расширением из fname/title/kind).
   static String forSave(
     MediaFile file, {
     String? dttmcr,
     DateTime? at,
   }) {
     final label = forFile(file, dttmcr: dttmcr, at: at);
-    final cleaned = label.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
-    if (cleaned.isEmpty) return 'document';
-    if (cleaned.contains('.')) return cleaned;
-    final ext = _extensionOf(file.fname) ?? _extensionOf(file.title);
-    if (ext == null || ext.isEmpty) return cleaned;
-    return '$cleaned.$ext';
+    var cleaned = label.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
+    if (cleaned.isEmpty) cleaned = 'document';
+
+    // Важно: метки времени вида «2025-08-06 в 10.54.52» содержат точки,
+    // но это НЕ расширение. Без реального .mp4 AVPlayer на macOS не играет.
+    if (!_hasRealExtension(cleaned)) {
+      final ext = _extensionOf(file.fname) ??
+          _extensionOf(file.title) ??
+          _extensionFromKind(file);
+      if (ext != null && ext.isNotEmpty) {
+        cleaned = '$cleaned.$ext';
+      }
+    }
+    return cleaned;
+  }
+
+  static bool _hasRealExtension(String name) {
+    final base = name.split(RegExp(r'[/\\]')).last;
+    final dot = base.lastIndexOf('.');
+    if (dot <= 0 || dot >= base.length - 1) return false;
+    final ext = base.substring(dot + 1).trim();
+    // «10.54.52» → сегмент «52» — не расширение файла.
+    if (!RegExp(r'^[a-zA-Z][a-zA-Z0-9]{0,7}$').hasMatch(ext) &&
+        !RegExp(r'^[a-zA-Z0-9]{2,8}$').hasMatch(ext)) {
+      return false;
+    }
+    // Чистые числа (секунды из таймстемпа) — не MIME-расширение.
+    if (RegExp(r'^\d+$').hasMatch(ext)) return false;
+    return true;
   }
 
   static String? _extensionOf(String raw) {
     final base = raw.trim().split(RegExp(r'[/\\]')).last;
     final dot = base.lastIndexOf('.');
     if (dot <= 0 || dot >= base.length - 1) return null;
-    final ext = base.substring(dot + 1).trim();
-    if (ext.isEmpty || !RegExp(r'^[a-zA-Z0-9]{1,8}$').hasMatch(ext)) {
+    final ext = base.substring(dot + 1).trim().toLowerCase();
+    if (ext.isEmpty || !RegExp(r'^[a-z0-9]{1,8}$').hasMatch(ext)) {
       return null;
     }
-    return ext.toLowerCase();
+    if (RegExp(r'^\d+$').hasMatch(ext)) return null;
+    return ext;
+  }
+
+  static String? _extensionFromKind(MediaFile file) {
+    final k = file.kind.trim().toLowerCase();
+    switch (k) {
+      case 'video':
+      case 'mp4':
+      case 'm4v':
+        return 'mp4';
+      case 'mov':
+        return 'mov';
+      case 'webm':
+        return 'webm';
+      case 'mkv':
+        return 'mkv';
+      case 'avi':
+        return 'avi';
+      case 'm4a':
+      case 'aac':
+      case 'voice':
+        return 'm4a';
+      case 'mp3':
+      case 'mpeg':
+        return 'mp3';
+      case 'ogg':
+      case 'opus':
+        return 'ogg';
+      case 'wav':
+        return 'wav';
+      case 'jpg':
+      case 'jpeg':
+      case 'image':
+      case 'img':
+        return 'jpg';
+      case 'png':
+        return 'png';
+      case 'gif':
+        return 'gif';
+      case 'webp':
+        return 'webp';
+      case 'pdf':
+        return 'pdf';
+      default:
+        if (file.isAudio) return 'm4a';
+        if (file.isVideo) return 'mp4';
+        return null;
+    }
   }
 }

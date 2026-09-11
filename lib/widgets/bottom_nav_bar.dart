@@ -8,8 +8,8 @@ import '../theme/app_theme.dart';
 class ForumBottomNav extends StatelessWidget {
   const ForumBottomNav({super.key});
 
-  static const _compactWidth = 420;
-  static const _ultraCompactWidth = 260;
+  static const _compactWidth = 300;
+  static const _ultraCompactWidth = 220;
 
   @override
   Widget build(BuildContext context) {

@@ -5,6 +5,7 @@ import '../api/msg_list_cursors.dart';
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
 import '../utils/media_display_name.dart';
+import '../utils/voice_histogram.dart';
 
 /// Формирование WS `msg` для пересылки (repost) без повторного upload.
 class ForwardMapper {
@@ -41,6 +42,22 @@ class ForwardMapper {
         if (message.isImage) return 'media';
         return 'txt';
     }
+  }
+
+  static Map<String, dynamic> buildClonePayload({
+    required MessageViewModel source,
+    required String dlgId,
+    required String hash,
+  }) {
+    final payload = buildPayload(
+      source: source,
+      dlgId: dlgId,
+      hash: hash,
+      prnId: source.referenceId,
+    );
+    payload.remove('repost');
+    payload.remove('prn_id');
+    return payload;
   }
 
   static Map<String, dynamic> buildPayload({
@@ -136,6 +153,7 @@ class ForwardMapper {
       latitude: source.latitude,
       longitude: source.longitude,
       address: source.address,
+      locationLive: source.locationLive,
       showUserName: false,
       avaOnTop: !sameAuthorAsPrev,
       avaOnBottom: true,
@@ -208,7 +226,8 @@ class ForwardMapper {
       if (file.hash.isNotEmpty) 'hash': file.hash,
       'duration': file.duration.toString(),
       'size': file.size.toString(),
-      'hist': source.voiceHistogram,
+      if (source.voiceHistogram.isNotEmpty)
+        'hist': VoiceHistogram.toHex(source.voiceHistogram),
       'desc': source.desc.trim(),
     };
   }

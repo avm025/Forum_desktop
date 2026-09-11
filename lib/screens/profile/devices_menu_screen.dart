@@ -8,8 +8,11 @@ import 'qr_authorize_screen.dart';
 
 /// «Устройства» — как в Forum_ios `DevicesMenuViewController`:
 /// авторизация по QR + подключенные устройства.
+/// [embedded] — правая панель профиля без отдельного Scaffold.
 class DevicesMenuScreen extends StatelessWidget {
-  const DevicesMenuScreen({super.key});
+  final bool embedded;
+
+  const DevicesMenuScreen({super.key, this.embedded = false});
 
   @override
   Widget build(BuildContext context) {
@@ -18,6 +21,72 @@ class DevicesMenuScreen extends StatelessWidget {
     final pageBg = state.isDark ? p.bg1 : const Color(0xFFF4F5F7);
     final cardBg = state.isDark ? p.bg2 : Colors.white;
     final separator = state.isDark ? p.border1 : const Color(0xFFE9E9E9);
+
+    final list = ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: cardBg,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              _MenuRow(
+                icon: Icons.qr_code_scanner_rounded,
+                label: 'Авторизовать по QR-коду',
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const QrAuthorizeScreen(),
+                    ),
+                  );
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.only(left: 52),
+                child:
+                    Divider(height: 0.5, thickness: 0.5, color: separator),
+              ),
+              _MenuRow(
+                icon: Icons.devices_rounded,
+                label: 'Подключенные устройства',
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const ConnectedDevicesScreen(),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    if (embedded) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: 52,
+            child: Center(
+              child: Text(
+                'Устройства',
+                style: TextStyle(
+                  color: p.text1,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+          Expanded(child: list),
+        ],
+      );
+    }
 
     return Scaffold(
       backgroundColor: pageBg,
@@ -35,49 +104,7 @@ class DevicesMenuScreen extends StatelessWidget {
           ),
         ),
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: cardBg,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: Column(
-              children: [
-                _MenuRow(
-                  icon: Icons.qr_code_scanner_rounded,
-                  label: 'Авторизовать по QR-коду',
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const QrAuthorizeScreen(),
-                      ),
-                    );
-                  },
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(left: 52),
-                  child:
-                      Divider(height: 0.5, thickness: 0.5, color: separator),
-                ),
-                _MenuRow(
-                  icon: Icons.devices_rounded,
-                  label: 'Подключенные устройства',
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const ConnectedDevicesScreen(),
-                      ),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+      body: list,
     );
   }
 }

@@ -18,6 +18,8 @@ class AppearanceSettings {
   final int textSizeOffset;
   final bool liquidGlass;
   final int transparency;
+  /// Пузыри сообщений (фон вокруг текста). Локальная настройка.
+  final bool messageBubbles;
 
   const AppearanceSettings({
     this.theme = AppearanceTheme.system,
@@ -28,6 +30,7 @@ class AppearanceSettings {
     this.textSizeOffset = 0,
     this.liquidGlass = true,
     this.transparency = 100,
+    this.messageBubbles = true,
   });
 
   static const minTextSizeOffset = -3;
@@ -47,6 +50,7 @@ class AppearanceSettings {
     int? textSizeOffset,
     bool? liquidGlass,
     int? transparency,
+    bool? messageBubbles,
   }) {
     return AppearanceSettings(
       theme: theme ?? this.theme,
@@ -57,6 +61,7 @@ class AppearanceSettings {
       textSizeOffset: textSizeOffset ?? this.textSizeOffset,
       liquidGlass: liquidGlass ?? this.liquidGlass,
       transparency: transparency ?? this.transparency,
+      messageBubbles: messageBubbles ?? this.messageBubbles,
     );
   }
 
@@ -85,6 +90,7 @@ class AppearanceSettings {
         'textSizeOffset': textSizeOffset,
         'liquidGlass': liquidGlass,
         'transparency': transparency,
+        'messageBubbles': messageBubbles,
       };
 
   factory AppearanceSettings.fromJson(Map<String, dynamic> json) {
@@ -101,6 +107,9 @@ class AppearanceSettings {
           : _int(json['liquidGlass'], 1) == 1,
       transparency: _int(json['transparency'], 100)
           .clamp(minTransparency, maxTransparency),
+      messageBubbles: json['messageBubbles'] is bool
+          ? json['messageBubbles'] as bool
+          : _int(json['messageBubbles'], 1) == 1,
     );
   }
 

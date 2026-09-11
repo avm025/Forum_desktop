@@ -13,8 +13,11 @@ import '../widgets/avatar_widget.dart';
 import '../widgets/cached_forum_image.dart';
 
 /// Экран настроек оформления (Figma «Оформление»).
+/// [embedded] — правая панель профиля без push на весь экран.
 class AppearanceScreen extends StatefulWidget {
-  const AppearanceScreen({super.key});
+  final bool embedded;
+
+  const AppearanceScreen({super.key, this.embedded = false});
 
   @override
   State<AppearanceScreen> createState() => _AppearanceScreenState();
@@ -25,12 +28,34 @@ class _AppearanceScreenState extends State<AppearanceScreen> {
   late AppearanceSettings _original;
   bool _saving = false;
   bool _saved = false;
+  AppState? _appState;
 
   @override
   void initState() {
     super.initState();
     _original = context.read<AppState>().appearance;
     _draft = _original;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _appState = context.read<AppState>();
+  }
+
+  @override
+  void dispose() {
+    if (!_saved) {
+      final appState = _appState;
+      final original = _original;
+      // Нельзя notifyListeners во время unmount (дерево locked).
+      if (appState != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          appState.previewAppearance(original);
+        });
+      }
+    }
+    super.dispose();
   }
 
   Future<void> _save() async {
@@ -47,7 +72,17 @@ class _AppearanceScreenState extends State<AppearanceScreen> {
       return;
     }
     _saved = true;
-    if (mounted) Navigator.of(context).pop();
+    _original = _draft;
+    if (!widget.embedded && mounted) {
+      Navigator.of(context).pop();
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Оформление сохранено'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
   }
 
   void _update(AppearanceSettings next) {
@@ -63,32 +98,41 @@ class _AppearanceScreenState extends State<AppearanceScreen> {
     final isDark = state.isDark;
     final profileName = state.profile?.name ?? 'Ваше имя';
 
-    return PopScope(
-      canPop: !_saving,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop && !_saved) {
-          context.read<AppState>().previewAppearance(_original);
-        }
-      },
-      child: Scaffold(
-        backgroundColor: p.bg1,
-        appBar: AppBar(
-          backgroundColor: p.bg1,
-          elevation: 0,
-          leading: IconButton(
-            icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text1, size: 20),
-            onPressed: _saving ? null : () => Navigator.of(context).pop(),
-          ),
-          centerTitle: true,
-          title: Text(
-            'Оформление',
-            style: TextStyle(
-              color: p.text1,
-              fontSize: 17,
-              fontWeight: FontWeight.w600,
+    final header = SizedBox(
+      height: 52,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            if (!widget.embedded)
+              IconButton(
+                icon: Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: p.text1,
+                  size: 20,
+                ),
+                onPressed: _saving
+                    ? null
+                    : () {
+                        if (!_saved) {
+                          context.read<AppState>().previewAppearance(_original);
+                        }
+                        Navigator.of(context).pop();
+                      },
+              )
+            else
+              const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Оформление',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: p.text1,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
-          ),
-          actions: [
             TextButton(
               onPressed: _saving ? null : _save,
               child: _saving
@@ -111,77 +155,109 @@ class _AppearanceScreenState extends State<AppearanceScreen> {
             ),
           ],
         ),
-        body: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-          children: [
-            _SectionLabel('LIQUID GLASS'),
-            _LiquidGlassToggle(
-              value: _draft.liquidGlass,
-              onChanged: (v) => _update(_draft.copyWith(liquidGlass: v)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ПРОЗРАЧНОСТЬ'),
-            _TransparencySlider(
-              value: _draft.transparency,
-              accent: p.lime,
-              onChanged: (v) => _update(_draft.copyWith(transparency: v)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ТЕМА ОФОРМЛЕНИЯ'),
-            _ThemeCard(
-              selected: _draft.theme,
-              onChanged: (theme) => _update(_draft.copyWith(theme: theme)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ИНДИВИДУАЛЬНЫЕ НАСТРОЙКИ ТЕМЫ'),
-            _PreviewCard(
-              name: profileName,
-              draft: _draft,
-              database: db,
-              isDark: isDark,
-              palette: p,
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ЦВЕТА ПРИЛОЖЕНИЯ'),
-            _AppColorPicker(
-              colors: db.appColors,
-              selectedId: _draft.appColorId,
-              isDark: isDark,
-              onSelected: (id) => _update(_draft.copyWith(appColorId: id)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ЦВЕТ ИМЕНИ'),
-            _NameColorPicker(
-              colors: db.nameColors,
-              selectedId: _draft.nameColorId,
-              isDark: isDark,
-              onSelected: (id) => _update(_draft.copyWith(nameColorId: id)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ЦВЕТ АВАТАРА'),
-            _AvatarColorPicker(
-              colors: db.avatarColors,
-              selectedId: _draft.avatarColorId,
-              name: profileName,
-              isDark: isDark,
-              onSelected: (id) => _update(_draft.copyWith(avatarColorId: id)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('ФОН В ЧАТАХ'),
-            _BackgroundPicker(
-              backgrounds: db.backgroundsFor(isDark),
-              selectedUrl: _draft.bgImg,
-              onSelected: (url) => _update(_draft.copyWith(bgImg: url)),
-            ),
-            const SizedBox(height: 24),
-            _SectionLabel('РАЗМЕР ТЕКСТА'),
-            _TextSizeSlider(
-              value: _draft.textSizeOffset,
-              accent: p.lime,
-              onChanged: (v) => _update(_draft.copyWith(textSizeOffset: v)),
-            ),
-          ],
+      ),
+    );
+
+    final body = ListView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+      children: [
+        const _SectionLabel('LIQUID GLASS'),
+        _LiquidGlassToggle(
+          value: _draft.liquidGlass,
+          onChanged: (v) => _update(_draft.copyWith(liquidGlass: v)),
         ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ПУЗЫРИ СООБЩЕНИЙ'),
+        _MessageBubblesToggle(
+          value: _draft.messageBubbles,
+          onChanged: (v) => _update(_draft.copyWith(messageBubbles: v)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ПРОЗРАЧНОСТЬ'),
+        _TransparencySlider(
+          value: _draft.transparency,
+          accent: p.lime,
+          onChanged: (v) => _update(_draft.copyWith(transparency: v)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ТЕМА ОФОРМЛЕНИЯ'),
+        _ThemeCard(
+          selected: _draft.theme,
+          onChanged: (theme) => _update(_draft.copyWith(theme: theme)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ИНДИВИДУАЛЬНЫЕ НАСТРОЙКИ ТЕМЫ'),
+        _PreviewCard(
+          name: profileName,
+          draft: _draft,
+          database: db,
+          isDark: isDark,
+          palette: p,
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ЦВЕТА ПРИЛОЖЕНИЯ'),
+        _AppColorPicker(
+          colors: db.appColors,
+          selectedId: _draft.appColorId,
+          isDark: isDark,
+          onSelected: (id) => _update(_draft.copyWith(appColorId: id)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ЦВЕТ ИМЕНИ'),
+        _NameColorPicker(
+          colors: db.nameColors,
+          selectedId: _draft.nameColorId,
+          isDark: isDark,
+          onSelected: (id) => _update(_draft.copyWith(nameColorId: id)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ЦВЕТ АВАТАРА'),
+        _AvatarColorPicker(
+          colors: db.avatarColors,
+          selectedId: _draft.avatarColorId,
+          name: profileName,
+          isDark: isDark,
+          onSelected: (id) => _update(_draft.copyWith(avatarColorId: id)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('ФОН В ЧАТАХ'),
+        _BackgroundPicker(
+          backgrounds: db.backgroundsFor(isDark),
+          selectedUrl: _draft.bgImg,
+          onSelected: (url) => _update(_draft.copyWith(bgImg: url)),
+        ),
+        const SizedBox(height: 24),
+        const _SectionLabel('РАЗМЕР ТЕКСТА'),
+        _TextSizeSlider(
+          value: _draft.textSizeOffset,
+          accent: p.lime,
+          onChanged: (v) => _update(_draft.copyWith(textSizeOffset: v)),
+        ),
+      ],
+    );
+
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        header,
+        Expanded(child: body),
+      ],
+    );
+
+    if (widget.embedded) {
+      return content;
+    }
+
+    return PopScope(
+      canPop: !_saving,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop && !_saved) {
+          context.read<AppState>().previewAppearance(_original);
+        }
+      },
+      child: Scaffold(
+        backgroundColor: p.bg1,
+        body: SafeArea(child: content),
       ),
     );
   }
@@ -385,27 +461,39 @@ class _PreviewCard extends StatelessWidget {
                     ],
                   ),
                   const Spacer(),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: _PreviewBubble(
-                      text: 'Отображение в группе',
-                      color: palette.bg3,
-                      textColor: palette.text1,
-                      liquidGlass: draft.liquidGlass,
-                      opacity: draft.panelOpacity,
+                  if (draft.messageBubbles) ...[
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: _PreviewBubble(
+                        text: 'Отображение в группе',
+                        color: palette.bg3,
+                        textColor: palette.text1,
+                        liquidGlass: draft.liquidGlass,
+                        opacity: draft.panelOpacity,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: _PreviewBubble(
-                      text: 'Цвет своего сообщения',
-                      color: target,
-                      textColor: Colors.white,
-                      liquidGlass: draft.liquidGlass,
-                      opacity: draft.panelOpacity,
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: _PreviewBubble(
+                        text: 'Цвет своего сообщения',
+                        color: target,
+                        textColor: Colors.white,
+                        liquidGlass: draft.liquidGlass,
+                        opacity: draft.panelOpacity,
+                      ),
                     ),
-                  ),
+                  ] else ...[
+                    Text(
+                      'Отображение в группе',
+                      style: TextStyle(color: palette.text1, fontSize: 14),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Цвет своего сообщения',
+                      style: TextStyle(color: palette.text1, fontSize: 14),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -482,6 +570,42 @@ class _LiquidGlassToggle extends StatelessWidget {
             fontSize: 16,
             fontWeight: FontWeight.w500,
           ),
+        ),
+        value: value,
+        activeTrackColor: p.lime.withValues(alpha: 0.45),
+        activeThumbColor: p.lime,
+        onChanged: onChanged,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+      ),
+    );
+  }
+}
+
+class _MessageBubblesToggle extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _MessageBubblesToggle({required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Material(
+      color: p.bg2,
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: SwitchListTile(
+        title: Text(
+          'Пузыри сообщений',
+          style: TextStyle(
+            color: p.text1,
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        subtitle: Text(
+          value ? 'Фон вокруг текста включён' : 'Сообщения без фона',
+          style: TextStyle(color: p.text2, fontSize: 13),
         ),
         value: value,
         activeTrackColor: p.lime.withValues(alpha: 0.45),

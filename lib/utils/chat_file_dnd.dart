@@ -29,8 +29,8 @@ class ChatFileDnd {
 
   /// Собирает [DragItem] для одного вложения.
   ///
-  /// Документы — только уже локальные (без скрытой загрузки).
-  /// Картинки/видео — при необходимости скачиваем в кэш, чтобы DnD работал сразу.
+  /// При отсутствии локальной копии скачивает в кэш (как картинки/видео),
+  /// чтобы DnD и открытие работали сразу.
   static Future<DragItem?> buildDragItem(
     MediaFile file, {
     String? localId,
@@ -51,11 +51,14 @@ class ChatFileDnd {
           file,
           downloadUrl: url,
         );
-        if ((path == null || path.isEmpty) && isMediaAttachment(file)) {
-          path = await MediaFileLoader.ensureCached(
-            file,
-            downloadUrl: url,
-          );
+        if (path == null || path.isEmpty) {
+          if (url.trim().isNotEmpty ||
+              file.URL != null && file.URL!.trim().isNotEmpty) {
+            path = await MediaFileLoader.ensureCached(
+              file,
+              downloadUrl: url,
+            );
+          }
         }
       }
 

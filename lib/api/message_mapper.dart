@@ -9,6 +9,8 @@ import '../models/message_emoji_model.dart';
 import '../api/likes_mapper.dart';
 import '../models/message_view_model.dart';
 import '../utils/media_display_name.dart';
+import '../utils/voice_histogram.dart';
+
 /// Преобразование сообщений с сервера (msg_list / msg) → [MessageViewModel].
 class MessageMapper {
   MessageMapper._();
@@ -46,15 +48,17 @@ class MessageMapper {
     String? currentUserId,
     String? currentUserName,
   }) {
-    final serverType = json['type']?.toString() ?? 'txt';
+    final serverType = (json['type']?.toString() ?? 'txt').toLowerCase();
     final uiType = _mapType(serverType);
     final frId = json['fr_id']?.toString() ?? '';
     final my = currentUserId != null &&
         currentUserId.isNotEmpty &&
         frId == currentUserId;
 
-    final bodyRaw = json['body']?.toString() ?? '';
-    final bodyJson = _tryParseJson(bodyRaw);
+    // body бывает JSON-строкой или уже объектом (WS/msg_list).
+    final parsedBody = _parseBodyField(json['body']);
+    final bodyRaw = parsedBody.raw;
+    final bodyJson = parsedBody.map;
 
     var body = bodyRaw;
     var text = bodyRaw;
@@ -67,6 +71,7 @@ class MessageMapper {
     double? lat;
     double? lon;
     String? address;
+    var locationLive = false;
     MsgSize size = MsgSize.zero;
 
     final dttmcr = json['dttmcr']?.toString() ?? '';
@@ -113,12 +118,33 @@ class MessageMapper {
         desc = voiceBody['desc']?.toString() ?? '';
         body = 'Голосовое сообщение';
       case 'geo':
-        final geo = bodyJson ?? json;
-        lat = _toDouble(geo['lat'] ?? geo['latitude']);
-        lon = _toDouble(geo['lon'] ?? geo['longitude']);
-        address = geo['adrs']?.toString() ?? geo['address']?.toString() ?? '';
+      case 'geotr':
+        // geo — точка с adrs; geotr — live-трансляция { lat, lon, live, speed, comp }.
+        final geo = bodyJson ?? const <String, dynamic>{};
+        lat = _toDouble(
+          geo['lat'] ?? geo['latitude'] ?? json['lat'] ?? json['latitude'],
+        );
+        lon = _toDouble(
+          geo['lon'] ?? geo['longitude'] ?? json['lon'] ?? json['longitude'],
+        );
+        address = (geo['adrs'] ??
+                    geo['address'] ??
+                    json['adrs'] ??
+                    json['address'])
+                ?.toString()
+                .trim() ??
+            '';
         desc = geo['desc']?.toString() ?? '';
-        body = address.isNotEmpty ? address : 'Геопозиция';
+        final liveFlag = _parseLiveFlag(geo['live']);
+        locationLive = liveFlag ?? (serverType == 'geotr');
+        final trackEnded = serverType == 'geotr' && liveFlag == false;
+        if (trackEnded) {
+          address = 'Трансляция геопозиции завершена';
+        } else if (address.isEmpty) {
+          address = locationLive ? 'Трансляция геопозиции' : 'Геопозиция';
+        }
+        body = address;
+        text = body;
       case 'call':
         // Сырой JSON оставляем в body (reply prn_body / parse).
         body = bodyRaw;
@@ -142,9 +168,19 @@ class MessageMapper {
     final prnBodyJson = _tryParseJson(prnBody);
     MediaFile? prnFirstFile;
     String resolvedPrnBody = prnBody;
-    if (prnType.toLowerCase() == 'call') {
+    final prnTypeLower = prnType.toLowerCase();
+    if (prnTypeLower == 'call') {
       // Для call в prn_body хранится сырой JSON исходного сообщения.
       resolvedPrnBody = prnBody;
+    } else if (prnTypeLower == 'geo') {
+      // Как iOS DataConverter: в превью ответа — только adrs.
+      if (prnBodyJson != null) {
+        final adrs = (prnBodyJson['adrs'] ?? prnBodyJson['address'])
+                ?.toString()
+                .trim() ??
+            '';
+        resolvedPrnBody = adrs.isNotEmpty ? adrs : prnBody;
+      }
     } else if (prnBodyJson != null) {
       final prnFiles = _parseFiles(prnBodyJson['files'], dttmcr: dttmcr);
       if (prnFiles.isNotEmpty) prnFirstFile = prnFiles.first;
@@ -167,7 +203,10 @@ class MessageMapper {
       dttmrd: json['dttmrd']?.toString() ?? '',
       dtshow: _formatTime(json['dttmcr']?.toString() ?? ''),
       status: _parseInt(json['status']),
-      preview: json['preview']?.toString() ?? '',
+      preview: ApiConfig.resolveAssetUrl(
+        (json['preview'] ?? json['fr_ava'] ?? json['ava'] ?? json['usr_ava'])
+            ?.toString(),
+      ),
       url: ApiConfig.mediaUrl(json['url']?.toString()),
       fdir: json['fdir']?.toString() ?? '',
       hash: json['hash']?.toString() ?? '',
@@ -196,6 +235,7 @@ class MessageMapper {
       latitude: lat,
       longitude: lon,
       address: address,
+      locationLive: locationLive,
       emoji: LikesMapper.parseList(
         json['likes'],
         currentUserId: currentUserId,
@@ -218,7 +258,14 @@ class MessageMapper {
     target.dttmcr = incoming.dttmcr;
     target.dttmup = incoming.dttmup;
     target.dttmrd = incoming.dttmrd;
-    target.dtshow = incoming.dtshow;
+    // Время в пузыре — исходное время создания, не время правки.
+    target.dtshow = incoming.dtshow.isNotEmpty
+        ? incoming.dtshow
+        : target.dtshow;
+    if (incoming.dttmup.trim().isNotEmpty &&
+        incoming.dttmup.trim() != incoming.dttmcr.trim()) {
+      target.editedLocal = true;
+    }
     target.status = incoming.status;
     target.preview = incoming.preview;
     target.url = incoming.url;
@@ -236,6 +283,7 @@ class MessageMapper {
     target.latitude = incoming.latitude;
     target.longitude = incoming.longitude;
     target.address = incoming.address;
+    target.locationLive = incoming.locationLive;
     target.repost = incoming.repost;
     target.prn_id = incoming.prn_id;
     target.prn_body = incoming.prn_body;
@@ -261,23 +309,38 @@ class MessageMapper {
       final prev = i > 0 ? messages[i - 1] : null;
       final next = i < messages.length - 1 ? messages[i + 1] : null;
 
-      final sameAsPrev = prev != null && prev.fr_id == m.fr_id;
-      final sameAsNext = next != null && next.fr_id == m.fr_id;
+      final sameAsPrev = prev != null && _sameSender(prev, m);
+      final sameAsNext = next != null && _sameSender(m, next);
 
-      if (isGroupChat && !m.my) {
-        m.showUserName = !sameAsPrev;
-      }
+      // Шапка (имя + аватар сверху) у каждого нового отправителя —
+      // текст / голос / медиа / файл — одинаково.
+      m.showUserName = !sameAsPrev;
       // Кластер одного отправителя (скругления пузыря, отступы).
       m.avaOnTop = !sameAsPrev;
       m.avaOnBottom = !sameAsNext;
     }
   }
 
+  static bool _sameSender(MessageViewModel a, MessageViewModel b) {
+    if (a.my != b.my) return false;
+    final aId = a.fr_id?.trim() ?? '';
+    final bId = b.fr_id?.trim() ?? '';
+    if (aId.isNotEmpty && bId.isNotEmpty) return aId == bId;
+    // Один id пустой — не склеиваем (иначе voice/file без fr_id прячут шапку).
+    if (aId.isNotEmpty || bId.isNotEmpty) return false;
+    if (a.my && b.my) return true;
+    final aName = a.fr_name.trim();
+    final bName = b.fr_name.trim();
+    if (aName.isNotEmpty && bName.isNotEmpty) return aName == bName;
+    return false;
+  }
+
   static String _mapType(String serverType) {
-    switch (serverType) {
+    switch (serverType.toLowerCase()) {
       case 'txt':
         return 'text';
       case 'geo':
+      case 'geotr':
         return 'location';
       case 'img':
         return 'image';
@@ -285,8 +348,23 @@ class MessageMapper {
       case 'video':
         return 'media';
       default:
-        return serverType;
+        return serverType.toLowerCase();
     }
+  }
+
+  /// `body` с сервера: строка JSON или уже распарсенный Map.
+  static ({String raw, Map<String, dynamic>? map}) _parseBodyField(dynamic raw) {
+    if (raw == null) return (raw: '', map: null);
+    if (raw is Map) {
+      final map = Map<String, dynamic>.from(raw);
+      try {
+        return (raw: jsonEncode(map), map: map);
+      } catch (_) {
+        return (raw: map.toString(), map: map);
+      }
+    }
+    final s = raw.toString();
+    return (raw: s, map: _tryParseJson(s));
   }
 
   static List<MediaFile> _parseFiles(dynamic raw, {String? dttmcr}) {
@@ -327,8 +405,8 @@ class MessageMapper {
   }
 
   static List<int> _parseHistogram(dynamic raw) {
-    if (raw is! List) return const [];
-    return raw.map((e) => _parseInt(e)).toList();
+    // Forum_ios: hex `"038CF5…"` или `[Int]` / `voice_histogram`.
+    return VoiceHistogram.parse(raw);
   }
 
   static Map<String, dynamic>? _tryParseJson(String raw) {
@@ -337,6 +415,17 @@ class MessageMapper {
       final v = jsonDecode(raw);
       if (v is Map) return Map<String, dynamic>.from(v);
     } catch (_) {}
+    return null;
+  }
+
+  /// `null` — поля нет; иначе `live == 1` / `true`.
+  static bool? _parseLiveFlag(dynamic v) {
+    if (v == null) return null;
+    if (v is bool) return v;
+    if (v is num) return v.toInt() == 1;
+    final s = v.toString().trim().toLowerCase();
+    if (s == 'true' || s == '1') return true;
+    if (s == 'false' || s == '0') return false;
     return null;
   }
 

@@ -41,8 +41,9 @@ class AppearanceResolver {
     final entry = database.nameColorById(id);
     if (entry == null) return AppColors.purple;
     final hex = isDark ? entry.d : entry.l;
-    final alpha = isDark ? entry.dAlpha : entry.lAlpha;
-    return AppColors.parseHex(hex).withValues(alpha: alpha.clamp(0.0, 1.0));
+    // Имена в ленте рисуются поверх фона чата: server `l_a`/`d_a` часто
+    // слишком низкие → еле видно. Всегда непрозрачный цвет.
+    return AppColors.parseHex(hex);
   }
 
   List<String> avatarHexFor({required bool isDark, int? colorId}) {

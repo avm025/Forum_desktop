@@ -46,6 +46,9 @@ typedef MsgPushHandler = void Function(Map<String, dynamic> data);
 /// Push `msg_list` без ожидающего запроса (новые сообщения с сервера).
 typedef MsgListPushHandler = void Function(Map<String, dynamic> data);
 
+/// Push `dlg` без ожидающего запроса — новая группа / карточка диалога.
+typedef DlgCreatedPushHandler = void Function(Map<String, dynamic> resp);
+
 /// Push `status` — обновление статусов доставки/прочтения (WS_STATUS.md).
 typedef StatusPushHandler = void Function(Map<String, dynamic> data);
 
@@ -57,6 +60,9 @@ typedef AddLikePushHandler = void Function(Map<String, dynamic> data);
 
 /// Push `typing` — индикатор набора (typing.md).
 typedef TypingPushHandler = void Function(Map<String, dynamic> data);
+
+/// Push закрепления сообщений (`add_pin_msg` / `pin_msg_*`).
+typedef PinMsgPushHandler = void Function(Map<String, dynamic> map);
 
 /// Push `check_qr` с JWT на ожидающем устройстве (онбординг).
 typedef CheckQrAuthHandler = void Function(Map<String, dynamic> data);
@@ -77,10 +83,12 @@ class ForumApiClient {
 
   MsgPushHandler? onMsgPush;
   MsgListPushHandler? onMsgListPush;
+  DlgCreatedPushHandler? onDlgCreatedPush;
   StatusPushHandler? onStatusPush;
   MsgDelPushHandler? onMsgDelPush;
   AddLikePushHandler? onAddLikePush;
   TypingPushHandler? onTypingPush;
+  PinMsgPushHandler? onPinMsgPush;
   CheckQrAuthHandler? onCheckQrAuth;
   ForceLogOutHandler? onForceLogOut;
   WsVoidCallback? onDisconnected;
@@ -269,9 +277,11 @@ class ForumApiClient {
   void dispose() {
     onMsgPush = null;
     onMsgListPush = null;
+    onDlgCreatedPush = null;
     onStatusPush = null;
     onMsgDelPush = null;
     onAddLikePush = null;
+    onPinMsgPush = null;
     onCheckQrAuth = null;
     onForceLogOut = null;
     onDisconnected = null;
@@ -533,6 +543,114 @@ class ForumApiClient {
     channel.sink.add(jsonEncode(message));
   }
 
+  /// WS `add_pin_msg` (как iOS).
+  void sendPinMsgAdd({
+    required String dlgId,
+    required String msgId,
+    required String usrId,
+    bool forBoth = true,
+  }) {
+    _sendPinMsg(
+      type: 'add_pin_msg',
+      dlgId: dlgId,
+      msgId: msgId,
+      usrId: usrId,
+      forBoth: forBoth,
+    );
+  }
+
+  /// WS `del_pin_msg` (как iOS).
+  void sendPinMsgDel({
+    required String dlgId,
+    required String msgId,
+    required String usrId,
+    bool forBoth = true,
+  }) {
+    _sendPinMsg(
+      type: 'del_pin_msg',
+      dlgId: dlgId,
+      msgId: msgId,
+      usrId: usrId,
+      forBoth: forBoth,
+    );
+  }
+
+  void _sendPinMsg({
+    required String type,
+    required String dlgId,
+    required String msgId,
+    required String usrId,
+    required bool forBoth,
+  }) {
+    final channel = _channel;
+    if (channel == null || dlgId.trim().isEmpty || msgId.trim().isEmpty) {
+      return;
+    }
+    // iOS: usr_id + token + grp_id + msg_id.
+    final data = <String, dynamic>{
+      'usr_id': usrId,
+      'token': ApiConfig.token,
+      'grp_id': dlgId,
+      'dlg_id': dlgId,
+      'msg_id': msgId,
+      // Telegram-like oneside: 1 = только у меня, 0 = у обоих / всех.
+      'oneside': forBoth ? 0 : 1,
+    };
+    final message = {'type': type, 'data': data};
+    ApiLogger.instance.logWsSend(type, message);
+    channel.sink.add(jsonEncode(message));
+  }
+
+  /// WS `list_pin_msg` — список закреплённых (как iOS).
+  Future<List<String>> fetchPinnedMessageIds(
+    String dlgId, {
+    String usrId = '',
+  }) async {
+    final data = <String, dynamic>{
+      'grp_id': dlgId,
+      'dlg_id': dlgId,
+      if (usrId.trim().isNotEmpty) 'usr_id': usrId.trim(),
+      if (ApiConfig.token.isNotEmpty) 'token': ApiConfig.token,
+    };
+    Map<String, dynamic> map;
+    try {
+      map = await sendWs(
+        {'type': 'list_pin_msg', 'data': data},
+        timeout: const Duration(seconds: 8),
+      );
+    } catch (_) {
+      map = await sendWs(
+        {'type': 'pin_msg_list', 'data': data},
+        timeout: const Duration(seconds: 8),
+      );
+    }
+    return _parsePinnedIds(map);
+  }
+
+  List<String> _parsePinnedIds(Map<String, dynamic> map) {
+    final raw = map['data'] ?? map['msgs'] ?? map['list'];
+    final ids = <String>[];
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is Map) {
+          final id = item['id']?.toString().trim() ??
+              item['msg_id']?.toString().trim() ??
+              '';
+          if (id.isNotEmpty) ids.add(id);
+        } else {
+          final id = item?.toString().trim() ?? '';
+          if (id.isNotEmpty) ids.add(id);
+        }
+      }
+    } else if (raw is Map) {
+      final id = raw['id']?.toString().trim() ??
+          raw['msg_id']?.toString().trim() ??
+          '';
+      if (id.isNotEmpty) ids.add(id);
+    }
+    return ids;
+  }
+
   /// WS `typing` — черновик / индикатор набора (typing.md). Fire-and-forget.
   /// Поля на верхнем уровне (не в `data`).
   void sendTyping({
@@ -672,6 +790,69 @@ class ForumApiClient {
     });
   }
 
+  /// WS `pin_dlg_add` — закрепить диалог в списке.
+  Future<Map<String, dynamic>> sendPinDlgAdd(String dlgId) {
+    return _sendPinDlg('pin_dlg_add', 'add_pin_dlg', dlgId);
+  }
+
+  /// WS `pin_dlg_del` — снять закрепление диалога.
+  Future<Map<String, dynamic>> sendPinDlgDel(String dlgId) {
+    return _sendPinDlg('pin_dlg_del', 'del_pin_dlg', dlgId);
+  }
+
+  Future<Map<String, dynamic>> _sendPinDlg(
+    String type,
+    String legacyType,
+    String dlgId,
+  ) async {
+    final data = {'dlg_id': dlgId, 'grp_id': dlgId};
+    try {
+      return await sendWs(
+        {'type': type, 'data': data},
+        timeout: const Duration(seconds: 8),
+      );
+    } catch (_) {
+      return sendWs(
+        {'type': legacyType, 'data': data},
+        timeout: const Duration(seconds: 8),
+      );
+    }
+  }
+
+  /// WS `del_dlg` — удалить диалог из списка ([pin_dlg_del.md] ссылается на `del_dlg`).
+  /// Fallback: устаревший `dlg_del`.
+  Future<Map<String, dynamic>> sendDlgDel(String dlgId) async {
+    final data = {'dlg_id': dlgId, 'grp_id': dlgId};
+    try {
+      return await sendWs(
+        {'type': 'del_dlg', 'data': data},
+        timeout: const Duration(seconds: 8),
+      );
+    } catch (_) {
+      return sendWs(
+        {'type': 'dlg_del', 'data': data},
+        timeout: const Duration(seconds: 8),
+      );
+    }
+  }
+
+  /// WS `dlg_usr_del` — удалить участника из группы / покинуть группу
+  /// ([dlg_usr_del.md](https://4um.me:7770/api_forum_doc/)).
+  ///
+  /// Чтобы выйти самому: `dlg_usr_id` = текущий `usr_id` сессии.
+  Future<Map<String, dynamic>> sendDlgUsrDel({
+    required String dlgId,
+    required String dlgUsrId,
+  }) {
+    return sendWs({
+      'type': 'dlg_usr_del',
+      'data': {
+        'dlg_id': dlgId,
+        'dlg_usr_id': dlgUsrId,
+      },
+    }, timeout: const Duration(seconds: 8));
+  }
+
   /// WS `dlg_grp` — создание или изменение папки (WS_DLG_GRP.md).
   Future<Map<String, dynamic>> sendDlgGrp({
     String? id,
@@ -691,6 +872,74 @@ class ForumApiClient {
       data['list'] = list;
     }
     return sendWs({'type': 'dlg_grp', 'data': data});
+  }
+
+  /// WS `dlg` — создание группового чата ([dlg.md](https://4um.me:7770/api_forum_doc/)).
+  ///
+  /// `data.name` + `data.users` (`usr_id` через запятую без пробелов).
+  /// Создатель добавляется сервером из WS-сессии; `usr_id` в `data` не шлём.
+  /// Ответ: `type: dlg`, `data: [ dialogCard, ... ]` — берём первый элемент.
+  Future<DialogsListViewModel> sendCreateGroup({
+    required String name,
+    required List<String> userIds,
+    String? currentUserId,
+  }) async {
+    final trimmedName = name.trim();
+    if (trimmedName.isEmpty) {
+      throw ArgumentError('Название группы обязательно');
+    }
+    final users = userIds
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .join(',');
+    final resp = await sendWs({
+      'type': 'dlg',
+      'data': {
+        'name': trimmedName,
+        'users': users,
+      },
+    });
+    final status = resp['status']?.toString();
+    if (status == 'bad' || resp['success'] == false) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Не удалось создать группу',
+        payload: resp,
+      );
+    }
+
+    final created = parseCreatedDialogResponse(
+      resp,
+      currentUserId: currentUserId,
+    );
+    if (created == null) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Сервер не вернул карточку группы',
+        payload: resp,
+      );
+    }
+    return created;
+  }
+
+  /// Карточка нового диалога из ответа `dlg` / `dlg_ai` (`data[0]`).
+  DialogsListViewModel? parseCreatedDialogResponse(
+    Map<String, dynamic> resp, {
+    String? currentUserId,
+  }) {
+    final data = resp['data'];
+    Map<String, dynamic>? raw;
+    if (data is List && data.isNotEmpty && data.first is Map) {
+      raw = Map<String, dynamic>.from(data.first as Map);
+    } else if (data is Map) {
+      final dialogs = data['dialogs'];
+      if (dialogs is List && dialogs.isNotEmpty && dialogs.first is Map) {
+        raw = Map<String, dynamic>.from(dialogs.first as Map);
+      } else {
+        raw = Map<String, dynamic>.from(data);
+      }
+    }
+    if (raw == null) return null;
+    return DialogMapper.fromServerJson(raw, currentUserId: currentUserId);
   }
 
   /// WS `dlg_grp_del` — удаление папки (`id` — число).
@@ -901,12 +1150,26 @@ class ForumApiClient {
         return;
       }
 
-      if (type == 'msg') {
+      if (type == 'msg' || type == 'unread') {
         _pending.remove(type);
-        final payload = _extractMsgPayload(map);
+        final payload = type == 'unread'
+            ? _extractUnreadPayload(map)
+            : _extractMsgPayload(map);
         if (payload != null) {
           ApiLogger.instance.logWsReceive(type, map);
           onMsgPush?.call(payload);
+        }
+        return;
+      }
+
+      if (type == 'dlg') {
+        final completer = _pending.remove(type);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(map);
+        } else {
+          // Push другим участникам при создании группы / добавлении.
+          ApiLogger.instance.logWsReceive(type, map);
+          onDlgCreatedPush?.call(map);
         }
         return;
       }
@@ -960,6 +1223,22 @@ class ForumApiClient {
         return;
       }
 
+      if (type == 'add_pin_msg' ||
+          type == 'del_pin_msg' ||
+          type == 'list_pin_msg' ||
+          type == 'pin_msg_add' ||
+          type == 'pin_msg_del' ||
+          type == 'pin_msg_list') {
+        final completer = _pending.remove(type);
+        if (completer != null && !completer.isCompleted) {
+          completer.complete(map);
+        } else {
+          ApiLogger.instance.logWsReceive(type, map);
+          onPinMsgPush?.call(map);
+        }
+        return;
+      }
+
       if (type == 'check_qr') {
         ApiLogger.instance.logWsReceive(type, map);
         final data = map['data'];
@@ -1001,6 +1280,7 @@ class ForumApiClient {
     }
 
     final hasMsgFields = map.containsKey('dlg_id') ||
+        map.containsKey('grp_id') ||
         map.containsKey('id') ||
         map.containsKey('body') ||
         map.containsKey('hash');
@@ -1011,6 +1291,15 @@ class ForumApiClient {
       copy.remove(key);
     }
     return copy;
+  }
+
+  /// iOS также обрабатывает `unread` как новое сообщение в списке чатов.
+  static Map<String, dynamic>? _extractUnreadPayload(Map<String, dynamic> map) {
+    final data = map['data'];
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    return _extractMsgPayload(map);
   }
 
   void _completeWithError(ForumApiException error) {
