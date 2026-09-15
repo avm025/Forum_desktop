@@ -68,7 +68,7 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
   }
 
   DialogsListViewModel? _dialogOf(AppState state) {
-    for (final d in state.dialogs) {
+    for (final d in state.allDialogs) {
       if (AppState.dlgIdsEqual(d.id, widget.dialogId)) return d;
     }
     return state.selectedDialog;
@@ -532,40 +532,63 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      _ActionStrip(
-                        fav: dialog.fav,
-                        isGroup: isGrp,
-                        canCall: !dialog.fav &&
-                            (isGrp ||
-                                (dialog.usr_id?.trim().isNotEmpty ?? false)),
-                        muted: _muted,
-                        onAudioCall: () => context
-                            .read<AppState>()
-                            .startCallFromChat(video: false),
-                        onVideoCall: () => context
-                            .read<AppState>()
-                            .startCallFromChat(video: true),
-                        onSearch: _openChatSearch,
-                        onMute: () {
-                          final next = !_muted;
-                          setState(() => _muted = next);
-                          final id = widget.dialogId.trim();
-                          if (id.isNotEmpty) {
-                            context.read<AppState>().setDialogMuted(
-                                  id,
-                                  muted: next,
-                                );
-                          }
-                        },
-                        onLeave: () => _onMoreAction(dialog, 'Покинуть группу'),
-                        onMore: () => _showMoreMenu(dialog),
-                        onFavSearch: _openChatSearch,
-                        onFavClear: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Очистить — скоро')),
-                          );
-                        },
-                      ),
+                      if (dialog.awaitingJoin)
+                        _JoinPublicButton(
+                          onJoin: () async {
+                            final id = dialog.id?.trim() ?? '';
+                            if (id.isEmpty) return;
+                            try {
+                              await context
+                                  .read<AppState>()
+                                  .joinPublicDialog(id);
+                              if (context.mounted) {
+                                Navigator.of(context).maybePop();
+                              }
+                            } catch (e) {
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('$e')),
+                              );
+                            }
+                          },
+                        )
+                      else
+                        _ActionStrip(
+                          fav: dialog.fav,
+                          isGroup: isGrp,
+                          canCall: !dialog.fav &&
+                              (isGrp ||
+                                  (dialog.usr_id?.trim().isNotEmpty ?? false)),
+                          muted: _muted,
+                          onAudioCall: () => context
+                              .read<AppState>()
+                              .startCallFromChat(video: false),
+                          onVideoCall: () => context
+                              .read<AppState>()
+                              .startCallFromChat(video: true),
+                          onSearch: _openChatSearch,
+                          onMute: () {
+                            final next = !_muted;
+                            setState(() => _muted = next);
+                            final id = widget.dialogId.trim();
+                            if (id.isNotEmpty) {
+                              context.read<AppState>().setDialogMuted(
+                                    id,
+                                    muted: next,
+                                  );
+                            }
+                          },
+                          onLeave: () =>
+                              _onMoreAction(dialog, 'Покинуть группу'),
+                          onMore: () => _showMoreMenu(dialog),
+                          onFavSearch: _openChatSearch,
+                          onFavClear: () {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('Очистить — скоро')),
+                            );
+                          },
+                        ),
                       if (!dialog.fav) ...[
                         const SizedBox(height: 12),
                         _InfoCard(
@@ -733,6 +756,59 @@ class _ChromeButton extends StatelessWidget {
           height: 36,
           child: Icon(icon, color: Colors.white, size: 18),
         ),
+      ),
+    );
+  }
+}
+
+class _JoinPublicButton extends StatefulWidget {
+  final Future<void> Function() onJoin;
+
+  const _JoinPublicButton({required this.onJoin});
+
+  @override
+  State<_JoinPublicButton> createState() => _JoinPublicButtonState();
+}
+
+class _JoinPublicButtonState extends State<_JoinPublicButton> {
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return SizedBox(
+      height: 48,
+      child: FilledButton(
+        onPressed: _busy
+            ? null
+            : () async {
+                setState(() => _busy = true);
+                try {
+                  await widget.onJoin();
+                } finally {
+                  if (mounted) setState(() => _busy = false);
+                }
+              },
+        style: FilledButton.styleFrom(
+          backgroundColor: p.purple,
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+        ),
+        child: _busy
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : const Text(
+                'Присоединиться',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
       ),
     );
   }

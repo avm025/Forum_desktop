@@ -7,6 +7,7 @@ import '../theme/app_theme.dart';
 import '../utils/chat_file_dnd.dart';
 
 /// Приём файлов (в т.ч. группы) из Finder/Explorer в открытый диалог.
+/// Файлы попадают в поле ввода и отправляются только по кнопке Send.
 class ChatDropTarget extends StatefulWidget {
   final Widget child;
 
@@ -64,11 +65,11 @@ class _ChatDropTargetState extends State<ChatDropTarget> {
         try {
           final files = await ChatFileDnd.readDroppedFiles(event.session);
           if (!mounted || files.isEmpty) return;
-          await appState.sendDroppedAttachments(files);
+          await appState.stageDroppedAttachments(files);
         } catch (e) {
           if (!mounted) return;
           messenger.showSnackBar(
-            SnackBar(content: Text('Не удалось отправить файлы: $e')),
+            SnackBar(content: Text('Не удалось прикрепить файлы: $e')),
           );
         } finally {
           if (mounted) setState(() => _busy = false);
@@ -84,41 +85,51 @@ class _ChatDropTargetState extends State<ChatDropTarget> {
                 duration: const Duration(milliseconds: 120),
                 color: p.purple.withValues(alpha: _busy ? 0.10 : 0.18),
                 alignment: Alignment.center,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  decoration: BoxDecoration(
-                    color: p.bg2.withValues(alpha: 0.92),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: p.purple, width: 1.5),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (_busy)
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: p.purple,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 360),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: p.bg2.withValues(alpha: 0.92),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: p.purple, width: 1.5),
+                    ),
+                    child: Row(
+                      children: [
+                        if (_busy)
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: p.purple,
+                            ),
+                          )
+                        else
+                          Icon(Icons.attach_file,
+                              color: p.purple, size: 22),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _busy
+                                ? 'Прикрепление…'
+                                : 'Отпустите, чтобы прикрепить',
+                            style: TextStyle(
+                              color: p.text1,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            softWrap: true,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        )
-                      else
-                        Icon(Icons.file_download_outlined,
-                            color: p.purple, size: 22),
-                      const SizedBox(width: 10),
-                      Text(
-                        _busy
-                            ? 'Отправка…'
-                            : 'Отпустите, чтобы отправить в чат',
-                        style: TextStyle(
-                          color: p.text1,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),

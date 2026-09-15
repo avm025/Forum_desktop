@@ -7,6 +7,9 @@ class MsgListResult {
 
   final List<MessageViewModel> messages;
 
+  /// `msg_id` непрочитанных упоминаний текущего пользователя (`msgs_usr`).
+  final List<String> msgsUsr;
+
   /// В ответе есть data.first_id → режим истории (вставка в начало).
   final bool isHistory;
 
@@ -18,6 +21,7 @@ class MsgListResult {
 
   const MsgListResult({
     required this.messages,
+    this.msgsUsr = const [],
     this.isHistory = false,
     this.responseFirstId,
     this.hasMoreHistory = false,

@@ -19,6 +19,8 @@ class MessageViewModel {
   final String type;
   final int ai;
   final bool my;
+  /// `1` — это сообщение тэгает текущего пользователя (группа, персонально).
+  int tagged;
   String body;
   final String fr_name;
   final String? fr_id;
@@ -73,6 +75,7 @@ class MessageViewModel {
     required this.type,
     this.ai = 0,
     this.my = false,
+    this.tagged = 0,
     this.body = '',
     this.fr_name = '',
     this.fr_id,

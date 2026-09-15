@@ -39,7 +39,8 @@ class DialogTile extends StatelessWidget {
     final draftLabelColor = emphasized ? Colors.white : p.purple;
 
     // Как Telegram: при черновике галочки последнего исходящего не показываем.
-    final isOutgoing = draft == null && dialog.last_msg_status >= 0;
+    // status >= -1: отправляется / отправлено / доставлено / прочитано.
+    final isOutgoing = draft == null && dialog.last_msg_status >= -1;
     final bg = selectMode
         ? Colors.transparent
         : dropHover
@@ -124,16 +125,16 @@ class DialogTile extends StatelessWidget {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            if (isOutgoing) ...[
-                              StatusTicks(
-                                  status: dialog.last_msg_status, size: 15),
-                              const SizedBox(width: 4),
-                            ],
                             Text(
                               dialog.last_msg_dttmcr,
                               style:
                                   TextStyle(color: timeColor, fontSize: 13),
                             ),
+                            if (isOutgoing) ...[
+                              const SizedBox(width: 4),
+                              StatusTicks(
+                                  status: dialog.last_msg_status, size: 15),
+                            ],
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -224,23 +225,54 @@ class DialogTile extends StatelessWidget {
 
   Widget _trailingIndicator(ForumPalette p, bool onSelected) {
     if (dialog.unread > 0) {
-      return Container(
-        constraints: const BoxConstraints(minWidth: 20),
-        height: 20,
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        decoration: BoxDecoration(
-          color: onSelected ? Colors.white : p.text3,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        alignment: Alignment.center,
-        child: Text(
-          '${dialog.unread}',
-          style: TextStyle(
-            color: onSelected ? p.selectedTile : p.bg1,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
+      final accent = dialog.hasTagged;
+      final badgeBg = onSelected
+          ? Colors.white
+          : (accent ? p.purple : p.text3);
+      final badgeFg = onSelected ? p.selectedTile : p.bg1;
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (accent) ...[
+            Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                color: badgeBg,
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '@',
+                style: TextStyle(
+                  color: badgeFg,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
+          Container(
+            constraints: const BoxConstraints(minWidth: 20),
+            height: 20,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: BoxDecoration(
+              color: badgeBg,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              '${dialog.unread}',
+              style: TextStyle(
+                color: badgeFg,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
-        ),
+        ],
       );
     }
     if (dialog.fav) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -94,9 +96,11 @@ class DialogsSidebar extends StatelessWidget {
     if (dialogs.isEmpty) {
       return Center(
         child: Text(
-          state.connectionStatus == ConnectionStatus.connected
-              ? 'Чаты не найдены'
-              : 'Нет данных',
+          state.dlgSearchLoading
+              ? 'Поиск…'
+              : state.connectionStatus == ConnectionStatus.connected
+                  ? 'Чаты не найдены'
+                  : 'Нет данных',
           style: TextStyle(color: p.text2, fontSize: 15),
         ),
       );
@@ -110,12 +114,12 @@ class DialogsSidebar extends StatelessWidget {
           selectedId: state.selectedId,
           hoverId: hoverId,
           selectMode: state.dialogsSelectMode,
-          onSelect: (id) {
+          onSelect: (dialog) {
             final app = context.read<AppState>();
             if (app.dialogsSelectMode) {
-              app.toggleDialogChecked(id);
+              app.toggleDialogChecked(dialog.id);
             } else {
-              app.selectDialog(id);
+              unawaited(app.openListedDialog(dialog));
             }
           },
         );
@@ -626,7 +630,7 @@ class _DialogsScrollList extends StatefulWidget {
   final String? selectedId;
   final String? hoverId;
   final bool selectMode;
-  final void Function(String? id) onSelect;
+  final void Function(DialogsListViewModel dialog) onSelect;
 
   const _DialogsScrollList({
     required this.dialogs,
@@ -672,7 +676,7 @@ class _DialogsScrollListState extends State<_DialogsScrollList> {
               widget.hoverId == id,
           selectMode: widget.selectMode,
           checked: widget.selectMode && app.isDialogChecked(d.id),
-          onTap: () => widget.onSelect(d.id),
+          onTap: () => widget.onSelect(d),
           onContextMenu: widget.selectMode
               ? null
               : (pos) => DialogContextMenu.show(

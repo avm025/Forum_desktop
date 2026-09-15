@@ -55,6 +55,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       backgroundColor: p.bg1,
       body: Column(
         children: [
+          if (state.emergencyMentionText != null)
+            Material(
+              color: p.purple,
+              child: SafeArea(
+                bottom: false,
+                child: ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.campaign_rounded,
+                      color: Colors.white, size: 22),
+                  title: Text(
+                    state.emergencyMentionText!,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white70),
+                    onPressed: () => state.clearEmergencyMention(),
+                  ),
+                  onTap: () {
+                    final dlgId = state.emergencyMentionDlgId;
+                    state.clearEmergencyMention(notify: false);
+                    if (dlgId != null && dlgId.isNotEmpty) {
+                      state.selectDialog(dlgId);
+                    }
+                  },
+                ),
+              ),
+            ),
           Expanded(child: _buildBody(context, state, p, wide: wide)),
           if (!navUnderSidebar)
             const SafeArea(

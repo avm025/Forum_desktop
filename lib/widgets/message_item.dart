@@ -821,15 +821,6 @@ class _MessageItemState extends State<MessageItem> {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (_isMine) ...[
-          StatusTicks(
-            status: message.status,
-            size: 14,
-            color: tickColor,
-            readColor: readTickColor,
-          ),
-          const SizedBox(width: 4),
-        ],
         if (edited) ...[
           Text(
             'изменено',
@@ -845,6 +836,15 @@ class _MessageItemState extends State<MessageItem> {
           message.dtshow,
           style: TextStyle(color: timeColor, fontSize: 11),
         ),
+        if (_isMine) ...[
+          const SizedBox(width: 4),
+          StatusTicks(
+            status: message.status,
+            size: 14,
+            color: tickColor,
+            readColor: readTickColor,
+          ),
+        ],
       ],
     );
   }

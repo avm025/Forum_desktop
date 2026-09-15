@@ -409,26 +409,14 @@ class _MediaGridState extends State<MediaGrid> {
 
     Widget content;
 
-    if (hasBytes && file.bytes!.length < 2 * 1024 * 1024) {
-      content = Image.memory(
-        file.bytes!,
-        key: ValueKey('mem_${file.hash}'),
-        fit: BoxFit.cover,
-        width: width,
-        height: height,
-        gaplessPlayback: true,
-        cacheWidth: (width * MediaQuery.devicePixelRatioOf(context)).round(),
-        cacheHeight: (height * MediaQuery.devicePixelRatioOf(context)).round(),
-      );
-    } else if (hasUrl ||
+    // Всегда MediaThumbTile: не переключать Image.memory ↔ Tile при появлении bytes
+    // (это давало мигание превью при upload).
+    if (hasBytes ||
+        hasUrl ||
         (file.URL != null && file.URL!.trim().isNotEmpty) ||
         MediaThumbCache.needsRemoteThumbnail(file)) {
       content = MediaThumbTile(
-        // Ключ без размера: иначе при ресайзе окна State сбрасывается
-        // и на мгновение показывается placeholder.
-        key: ValueKey(
-          'thumb_${file.hash.isNotEmpty ? file.hash : (file.URL ?? file.url)}',
-        ),
+        key: ValueKey('thumb_${_stableMediaKey(file)}'),
         file: file,
         width: width,
         height: height,
@@ -511,6 +499,18 @@ class _MediaGridState extends State<MediaGrid> {
     final m = seconds ~/ 60;
     final s = seconds % 60;
     return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  /// Локальный путь / fname важнее hash: иначе remount при появлении hash.
+  static String _stableMediaKey(MediaFile file) {
+    final local = file.URL?.trim() ?? '';
+    if (local.isNotEmpty && !local.startsWith('http')) return 'p_$local';
+    if (file.fname.isNotEmpty) {
+      return 'f_${file.fdir}_${file.fname}_${file.size}';
+    }
+    if (file.hash.isNotEmpty) return 'h_${file.hash}';
+    if (file.url.isNotEmpty) return 'u_${file.url}';
+    return 'k_${file.kind}_${file.size}';
   }
 }
 

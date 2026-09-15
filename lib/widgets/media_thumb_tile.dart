@@ -144,25 +144,8 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
     final cw = (w * dpr).round().clamp(1, 1024);
     final ch = (h * dpr).round().clamp(1, 1024);
 
-    // Уже сжатый JPEG после prepare / upload.
-    if (file.bytes != null &&
-        file.bytes!.isNotEmpty &&
-        file.bytes!.length < 2 * 1024 * 1024) {
-      return Image.memory(
-        file.bytes!,
-        key: ValueKey('bytes_${file.hash}_${file.bytes!.length}'),
-        width: w,
-        height: h,
-        fit: widget.fit,
-        gaplessPlayback: true,
-        cacheWidth: cw,
-        cacheHeight: ch,
-        filterQuality: FilterQuality.low,
-        frameBuilder: _frameBuilder,
-      );
-    }
-
-    // Локальный скрин/файл: нативный downsample, без Dart decode.
+    // Локальный путь важнее bytes: один Image.file от drop до эха сервера,
+    // без мигания при появлении сжатого JPEG в памяти.
     final localPath = file.URL?.trim() ?? '';
     if (localPath.isNotEmpty && !localPath.startsWith('http')) {
       final local = File(localPath);
@@ -183,10 +166,28 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
       }
     }
 
+    // Сжатый JPEG после prepare / upload (если локального пути нет).
+    if (file.bytes != null &&
+        file.bytes!.isNotEmpty &&
+        file.bytes!.length < 2 * 1024 * 1024) {
+      return Image.memory(
+        file.bytes!,
+        key: ValueKey('bytes_${_stableKey(file)}_${file.bytes!.length}'),
+        width: w,
+        height: h,
+        fit: widget.fit,
+        gaplessPlayback: true,
+        cacheWidth: cw,
+        cacheHeight: ch,
+        filterQuality: FilterQuality.low,
+        frameBuilder: _frameBuilder,
+      );
+    }
+
     if (_cachedFile != null) {
       return Image.file(
         _cachedFile!,
-        key: ValueKey('file_${file.hash}'),
+        key: ValueKey('file_${_stableKey(file)}'),
         width: w,
         height: h,
         fit: widget.fit,
@@ -212,8 +213,8 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
     int? frame,
     bool wasSynchronouslyLoaded,
   ) {
-    if (wasSynchronouslyLoaded || frame != null) return child;
-    return _blank(widget.width, widget.height);
+    // Не подменять кадр blank — иначе мигание при смене Image/декоде.
+    return child;
   }
 
   Widget _blank(double w, double h) {
@@ -247,5 +248,16 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         size: 40,
       ),
     );
+  }
+
+  static String _stableKey(MediaFile file) {
+    final local = file.URL?.trim() ?? '';
+    if (local.isNotEmpty && !local.startsWith('http')) return 'p_$local';
+    if (file.fname.isNotEmpty) {
+      return 'f_${file.fdir}_${file.fname}_${file.size}';
+    }
+    if (file.hash.isNotEmpty) return 'h_${file.hash}';
+    if (file.url.isNotEmpty) return 'u_${file.url}';
+    return 'k_${file.kind}_${file.size}';
   }
 }

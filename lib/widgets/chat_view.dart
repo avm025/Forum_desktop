@@ -51,6 +51,8 @@ class _ChatViewState extends State<ChatView> {
   bool _scrollingToBottom = false;
   double _lastScrollOffset = 0;
   Timer? _searchDebounce;
+  Timer? _mentionFlashTimer;
+  String? _mentionFlashId;
 
   /// Сколько самых новых сообщений уже показаны при первом открытии.
   /// Растёт от 1 вверх без скролла (reverse-список).
@@ -280,6 +282,7 @@ class _ChatViewState extends State<ChatView> {
   void dispose() {
     _revealGen++;
     _searchDebounce?.cancel();
+    _mentionFlashTimer?.cancel();
     _searchController.dispose();
     _searchFocusNode.dispose();
     _disposeScrollController();
@@ -479,6 +482,25 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
+  Future<void> _jumpToNextMention(AppState state) async {
+    final dlgId = widget.dialog.id?.trim();
+    if (dlgId == null || dlgId.isEmpty) return;
+    final id = state.consumeNextTaggedMsgId(dlgId);
+    if (id == null) return;
+    await _scrollToMessage(id);
+    if (!mounted) return;
+    _flashMention(id);
+  }
+
+  void _flashMention(String messageId) {
+    _mentionFlashTimer?.cancel();
+    setState(() => _mentionFlashId = messageId.trim());
+    _mentionFlashTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (!mounted) return;
+      setState(() => _mentionFlashId = null);
+    });
+  }
+
   void _openChatSearch() {
     if (_searchOpen) {
       _searchFocusNode.requestFocus();
@@ -672,6 +694,14 @@ class _ChatViewState extends State<ChatView> {
       return false;
     }
     return _searchMatchIds[_searchMatchIndex] == _messageStableKey(message);
+  }
+
+  bool _isMentionFlash(MessageViewModel message) {
+    final flash = _mentionFlashId;
+    if (flash == null || flash.isEmpty) return false;
+    return message.id == flash ||
+        message.hash == flash ||
+        _messageStableKey(message) == flash;
   }
 
   Future<bool> _scrollToMessageInternal(
@@ -988,11 +1018,17 @@ class _ChatViewState extends State<ChatView> {
                                       searchQuery:
                                           _searchHighlightFor(message),
                                       searchHighlightCurrent:
-                                          _searchIsCurrentMatch(message),
+                                          _searchIsCurrentMatch(message) ||
+                                              _isMentionFlash(message),
                                     ),
                                 };
                               },
                             ),
+                          ),
+                          _MentionsJumpButton(
+                            count: state.taggedMsgCount(dialog.id),
+                            visible: state.taggedMsgCount(dialog.id) > 0,
+                            onTap: () => unawaited(_jumpToNextMention(state)),
                           ),
                           _ScrollToBottomButton(
                             visible: _showScrollToBottom,
@@ -1001,7 +1037,9 @@ class _ChatViewState extends State<ChatView> {
                         ],
                       ),
           ),
-          const MessageInput(),
+          dialog.awaitingJoin
+              ? _JoinPublicDialogBar(dialog: dialog)
+              : const MessageInput(),
         ],
       ),
       ),
@@ -1040,6 +1078,77 @@ sealed class _ChatEntry {
   const _ChatEntry();
 }
 
+class _JoinPublicDialogBar extends StatefulWidget {
+  final DialogsListViewModel dialog;
+
+  const _JoinPublicDialogBar({required this.dialog});
+
+  @override
+  State<_JoinPublicDialogBar> createState() => _JoinPublicDialogBarState();
+}
+
+class _JoinPublicDialogBarState extends State<_JoinPublicDialogBar> {
+  bool _busy = false;
+
+  Future<void> _join() async {
+    final id = widget.dialog.id?.trim() ?? '';
+    if (id.isEmpty || _busy) return;
+    setState(() => _busy = true);
+    try {
+      await context.read<AppState>().joinPublicDialog(id);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: SizedBox(
+          width: double.infinity,
+          height: 48,
+          child: FilledButton(
+            onPressed: _busy ? null : _join,
+            style: FilledButton.styleFrom(
+              backgroundColor: p.purple,
+              foregroundColor: Colors.white,
+              disabledBackgroundColor: p.purple.withValues(alpha: 0.5),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: _busy
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Text(
+                    'Присоединиться',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _DateEntry extends _ChatEntry {
   final String label;
   const _DateEntry(this.label);
@@ -1060,6 +1169,79 @@ class _EmptyConversation extends StatelessWidget {
       child: Text(
         'Сообщений пока нет',
         style: TextStyle(color: palette.text2, fontSize: 15),
+      ),
+    );
+  }
+}
+
+class _MentionsJumpButton extends StatelessWidget {
+  final int count;
+  final bool visible;
+  final VoidCallback onTap;
+
+  const _MentionsJumpButton({
+    required this.count,
+    required this.visible,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+
+    return Positioned(
+      right: 16,
+      bottom: 64,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedSlide(
+          offset: visible ? Offset.zero : const Offset(0, 1.2),
+          duration: const Duration(milliseconds: 280),
+          curve: visible ? Curves.easeOutCubic : Curves.easeInCubic,
+          child: AnimatedOpacity(
+            opacity: visible ? 1 : 0,
+            duration: const Duration(milliseconds: 220),
+            child: Material(
+              color: p.purple,
+              elevation: visible ? 3 : 0,
+              shadowColor: Colors.black.withValues(alpha: 0.35),
+              shape: const StadiumBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: onTap,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        '@',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          height: 1,
+                        ),
+                      ),
+                      if (count > 0) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          '$count',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -9,6 +9,7 @@ import '../models/message_emoji_model.dart';
 import '../api/likes_mapper.dart';
 import '../models/message_view_model.dart';
 import '../utils/media_display_name.dart';
+import '../utils/reaction_utils.dart';
 import '../utils/voice_histogram.dart';
 
 /// Преобразование сообщений с сервера (msg_list / msg) → [MessageViewModel].
@@ -53,7 +54,7 @@ class MessageMapper {
     final frId = json['fr_id']?.toString() ?? '';
     final my = currentUserId != null &&
         currentUserId.isNotEmpty &&
-        frId == currentUserId;
+        ReactionUtils.sameUserId(frId, currentUserId);
 
     // body бывает JSON-строкой или уже объектом (WS/msg_list).
     final parsedBody = _parseBodyField(json['body']);
@@ -194,6 +195,7 @@ class MessageMapper {
       type: uiType,
       ai: _parseInt(json['ai']),
       my: my,
+      tagged: _parseInt(json['tagged']),
       body: body,
       text: text,
       fr_name: json['fr_name']?.toString() ?? '',
@@ -266,7 +268,10 @@ class MessageMapper {
         incoming.dttmup.trim() != incoming.dttmcr.trim()) {
       target.editedLocal = true;
     }
-    target.status = incoming.status;
+    // Не понижать статус (2→0 при повторном msg_list); -1 → 0/1/2 — ок.
+    target.status = _mergeStatus(target.status, incoming.status);
+    // Персональный флаг получателя: при эхе/мерже берём входящий.
+    target.tagged = incoming.tagged;
     target.preview = incoming.preview;
     target.url = incoming.url;
     target.fdir = incoming.fdir;
@@ -274,7 +279,8 @@ class MessageMapper {
     target.desc = incoming.desc;
     target.fileTitle = incoming.fileTitle;
     if (incoming.files.isNotEmpty) {
-      target.files = List.of(incoming.files);
+      // Не затирать локальные bytes/путь — иначе превью мигает, пока качается URL.
+      target.files = _mergeFilesKeepingLocalPreview(target.files, incoming.files);
     }
     if (incoming.voiceHistogram.isNotEmpty) {
       target.voiceHistogram = List.of(incoming.voiceHistogram);
@@ -292,6 +298,49 @@ class MessageMapper {
     target.prn_type = incoming.prn_type;
     target.prn_fileTitle = incoming.prn_fileTitle;
     target.prn_firstFile = incoming.prn_firstFile;
+  }
+
+  /// Серверные метаданные + локальные bytes/путь для бесшовного превью.
+  static List<MediaFile> _mergeFilesKeepingLocalPreview(
+    List<MediaFile> local,
+    List<MediaFile> incoming,
+  ) {
+    return [
+      for (var i = 0; i < incoming.length; i++)
+        _keepLocalFilePreview(
+          i < local.length ? local[i] : null,
+          incoming[i],
+        ),
+    ];
+  }
+
+  static MediaFile _keepLocalFilePreview(MediaFile? local, MediaFile remote) {
+    if (local == null) return remote;
+
+    final localBytes = local.bytes;
+    final keepBytes = localBytes != null && localBytes.isNotEmpty;
+    final localPath = local.URL?.trim() ?? '';
+    final keepLocalPath =
+        localPath.isNotEmpty && !localPath.startsWith('http');
+
+    if (!keepBytes && !keepLocalPath) return remote;
+
+    return MediaFile(
+      hash: remote.hash.isNotEmpty ? remote.hash : local.hash,
+      url: remote.url.isNotEmpty ? remote.url : local.url,
+      fname: remote.fname.isNotEmpty ? remote.fname : local.fname,
+      fdir: remote.fdir.isNotEmpty ? remote.fdir : local.fdir,
+      kind: remote.kind.isNotEmpty ? remote.kind : local.kind,
+      preview: remote.preview.isNotEmpty ? remote.preview : local.preview,
+      title: remote.title.isNotEmpty ? remote.title : local.title,
+      size: remote.size > 0 ? remote.size : local.size,
+      width: remote.widthValue > 0 ? remote.width : local.width,
+      height: remote.heightValue > 0 ? remote.height : local.height,
+      duration: remote.duration > 0 ? remote.duration : local.duration,
+      uploaded: remote.uploaded || local.uploaded,
+      URL: keepLocalPath ? local.URL : (remote.URL ?? local.URL),
+      bytes: keepBytes ? localBytes : remote.bytes,
+    );
   }
 
   /// Заменить реакции сообщения (push `add_like`).
@@ -432,8 +481,17 @@ class MessageMapper {
   static int _parseInt(dynamic v) {
     if (v == null) return 0;
     if (v is int) return v;
-    if (v is String) return int.tryParse(v) ?? 0;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v.trim()) ?? 0;
     return 0;
+  }
+
+  /// Слияние статусов: не откатывать delivered/read назад.
+  static int _mergeStatus(int local, int incoming) {
+    // Локально ещё «отправляется» — принять любой серверный >= 0.
+    if (local < 0) return incoming < 0 ? local : incoming;
+    if (incoming < 0) return local;
+    return incoming > local ? incoming : local;
   }
 
   static double? _toDouble(dynamic v) {

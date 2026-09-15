@@ -840,6 +840,7 @@ class ForumApiClient {
   /// ([dlg_usr_del.md](https://4um.me:7770/api_forum_doc/)).
   ///
   /// Чтобы выйти самому: `dlg_usr_id` = текущий `usr_id` сессии.
+  /// Для выхода текущего пользователя предпочтителен [`sendDlgExit`].
   Future<Map<String, dynamic>> sendDlgUsrDel({
     required String dlgId,
     required String dlgUsrId,
@@ -849,6 +850,110 @@ class ForumApiClient {
       'data': {
         'dlg_id': dlgId,
         'dlg_usr_id': dlgUsrId,
+      },
+    }, timeout: const Duration(seconds: 8));
+  }
+
+  /// HTTP `dlg_search` — публичные группы/каналы и контакты по телефону
+  /// ([dlg_search.md](https://4um.me:7770/api_forum_doc/)).
+  Future<List<DialogsListViewModel>> searchDialogs(
+    String text, {
+    String? currentUserId,
+  }) async {
+    final query = text.trim();
+    if (query.isEmpty) return const [];
+
+    final payload = {
+      'type': 'dlg_search',
+      'data': {'text': query},
+      if (ApiConfig.token.isNotEmpty) 'token': ApiConfig.token,
+    };
+    final body = jsonEncode(payload);
+    final sw = Stopwatch()..start();
+    ApiLogger.instance.logHttpSend('POST', ApiConfig.httpApiUrl, body);
+
+    final response = await _http
+        .post(
+          ApiConfig.httpApiUri,
+          headers: ApiConfig.authHeaders,
+          body: body,
+        )
+        .timeout(const Duration(seconds: 20));
+    sw.stop();
+    ApiLogger.instance.logHttpReceive(
+      response.statusCode,
+      response.body,
+      duration: sw.elapsed,
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ForumApiException('HTTP ${response.statusCode}: ${response.body}');
+    }
+
+    final map = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+    if (map['success'] != true) {
+      throw ForumApiException(
+        map['message']?.toString() ?? 'Ошибка поиска',
+        payload: map,
+      );
+    }
+    return _parseDialogs(map, currentUserId: currentUserId);
+  }
+
+  /// WS `dlg_join` — вступить в публичную группу/канал
+  /// ([dlg_join.md](https://4um.me:7770/api_forum_doc/)).
+  Future<DialogsListViewModel> sendDlgJoin({
+    required String dlgId,
+    required String dlgUsrId,
+    String? currentUserId,
+  }) async {
+    final id = dlgId.trim();
+    final usr = dlgUsrId.trim();
+    if (id.isEmpty || id == '0' || usr.isEmpty) {
+      throw ForumApiException('dlg_id / dlg_usr_id пусты');
+    }
+    final resp = await sendWs({
+      'type': 'dlg_join',
+      'data': {
+        'dlg_id': id,
+        'dlg_usr_id': usr,
+      },
+    }, timeout: const Duration(seconds: 12));
+    if (resp['success'] == false) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Не удалось присоединиться',
+        payload: resp,
+      );
+    }
+    final created = parseCreatedDialogResponse(
+      resp,
+      currentUserId: currentUserId ?? usr,
+    );
+    if (created == null) {
+      throw ForumApiException(
+        resp['message']?.toString() ?? 'Сервер не вернул карточку диалога',
+        payload: resp,
+      );
+    }
+    return created;
+  }
+
+  /// WS `dlg_exit` — покинуть группу/канал
+  /// ([dlg_exit.md](https://4um.me:7770/api_forum_doc/)).
+  Future<Map<String, dynamic>> sendDlgExit({
+    required String dlgId,
+    required String dlgUsrId,
+  }) {
+    final id = dlgId.trim();
+    final usr = dlgUsrId.trim();
+    if (id.isEmpty || id == '0' || usr.isEmpty) {
+      return Future.error(ForumApiException('dlg_id / dlg_usr_id пусты'));
+    }
+    return sendWs({
+      'type': 'dlg_exit',
+      'data': {
+        'dlg_id': id,
+        'dlg_usr_id': usr,
       },
     }, timeout: const Duration(seconds: 8));
   }
@@ -1273,17 +1378,30 @@ class ForumApiClient {
   }
 
   /// Push `msg`: поля в `data` или на верхнем уровне.
+  ///
+  /// Персональный `tagged` (и иногда `dlg_id`) может быть на обёртке —
+  /// копируем в payload, иначе `MessageMapper` его не увидит.
   static Map<String, dynamic>? _extractMsgPayload(Map<String, dynamic> map) {
     final data = map['data'];
     if (data is Map) {
-      return Map<String, dynamic>.from(data);
+      final payload = Map<String, dynamic>.from(data);
+      for (final key in ['dlg_id', 'grp_id']) {
+        if (!payload.containsKey(key) && map.containsKey(key)) {
+          payload[key] = map[key];
+        }
+      }
+      if (map.containsKey('tagged')) {
+        payload['tagged'] = map['tagged'];
+      }
+      return payload;
     }
 
     final hasMsgFields = map.containsKey('dlg_id') ||
         map.containsKey('grp_id') ||
         map.containsKey('id') ||
         map.containsKey('body') ||
-        map.containsKey('hash');
+        map.containsKey('hash') ||
+        map.containsKey('tagged');
     if (!hasMsgFields) return null;
 
     final copy = Map<String, dynamic>.from(map);
@@ -1476,9 +1594,11 @@ class ForumApiClient {
       );
     }
 
+    final msgsUsr = _parseMsgsUsr(data['msgs_usr']);
     final raw = data['msgs'];
+    // `msgs_usr` читаем даже при пустом/отсутствующем `msgs` (кнопка @).
     if (raw is! List) {
-      return MsgListResult.empty;
+      return MsgListResult(messages: const [], msgsUsr: msgsUsr);
     }
 
     if (raw.isNotEmpty && map.containsKey('success')) {
@@ -1510,6 +1630,7 @@ class ForumApiClient {
 
     return MsgListResult(
       messages: messages,
+      msgsUsr: msgsUsr,
       isHistory: isHistory,
       responseFirstId:
           responseFirstId != null && responseFirstId.isNotEmpty
@@ -1517,6 +1638,14 @@ class ForumApiClient {
               : null,
       hasMoreHistory: hasMoreHistory,
     );
+  }
+
+  static List<String> _parseMsgsUsr(dynamic raw) {
+    if (raw is! List) return const [];
+    return raw
+        .map((e) => e.toString().trim())
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
   }
 }
 

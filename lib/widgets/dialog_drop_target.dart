@@ -28,7 +28,7 @@ class DialogDropHover {
 /// Drop на строку чата в списке:
 /// — подсветка только этого чата (предыдущее выделение снимается);
 /// — через 1 с удержания открывается диалог;
-/// — drop отправляет файлы в этот чат.
+/// — drop прикрепляет файлы к полю ввода (отправка — по Send).
 class DialogDropTarget extends StatefulWidget {
   final String dlgId;
   final Widget child;
@@ -127,14 +127,14 @@ class _DialogDropTargetState extends State<DialogDropTarget> {
         try {
           final files = await ChatFileDnd.readDroppedFiles(event.session);
           if (!mounted || files.isEmpty) return;
-          await appState.sendDroppedAttachments(
+          await appState.stageDroppedAttachments(
             files,
             dlgId: widget.dlgId,
           );
         } catch (e) {
           if (!mounted) return;
           messenger?.showSnackBar(
-            SnackBar(content: Text('Не удалось отправить файлы: $e')),
+            SnackBar(content: Text('Не удалось прикрепить файлы: $e')),
           );
         } finally {
           if (mounted) setState(() => _busy = false);

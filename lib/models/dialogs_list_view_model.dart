@@ -20,6 +20,8 @@ class DialogsListViewModel {
   String last_msg_dttmcr;
   int last_msg_status;
   int unread;
+  /// `1` — непрочитанные упоминания/@all/ответы в группе ([dlg_list.tagged]).
+  int tagged;
   final ChatType chatType;
   bool chatMuted;
   bool isGrp;
@@ -29,6 +31,9 @@ class DialogsListViewModel {
   String? phone;
   bool fav;
   bool online;
+
+  /// Публичная группа/канал из `dlg_search`, куда ещё не вступили (`dlg_join`).
+  bool awaitingJoin;
 
   DialogsListViewModel({
     List<MessageViewModel>? messages,
@@ -46,6 +51,7 @@ class DialogsListViewModel {
     this.last_msg_dttmcr = '',
     this.last_msg_status = -2,
     this.unread = 0,
+    this.tagged = 0,
     this.chatType = ChatType.privateChat,
     this.chatMuted = false,
     this.isGrp = false,
@@ -55,10 +61,14 @@ class DialogsListViewModel {
     this.phone,
     this.fav = false,
     this.online = false,
+    this.awaitingJoin = false,
   }) : messages = messages ?? <MessageViewModel>[];
 
   bool get isPinned => pin > 0;
   bool get hasUnread => unread > 0;
+  bool get hasTagged => tagged > 0;
+  bool get isPublicGroup =>
+      isGrp && (groupAditionalInfo?.isPublic == true);
 
   /// Плейсхолдер отсутствия диалога (`new_contact_dlg.md`).
   static bool isPlaceholderDlgId(String? id) {

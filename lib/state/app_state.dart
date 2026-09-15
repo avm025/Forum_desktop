@@ -34,6 +34,7 @@ import '../models/dialog_group.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/dlg_info_member.dart';
 import '../models/forum_database.dart';
+import '../models/group_additional_info_model.dart';
 import '../models/global_search_chat_group.dart';
 import '../models/global_search_hit.dart';
 import '../models/global_search_scope.dart';
@@ -56,7 +57,9 @@ import '../utils/chat_file_dnd.dart';
 import '../utils/emoticon_replacer.dart';
 import '../utils/folder_list_codec.dart';
 import '../utils/media_display_name.dart';
+import '../utils/media_message_layout.dart';
 import '../utils/media_preprocessor.dart';
+import '../utils/mention_markup.dart';
 import '../utils/reaction_utils.dart';
 
 /// Статус подключения к серверу.
@@ -113,6 +116,18 @@ class AppState extends ChangeNotifier {
 
   /// ID входящих сообщений, для которых уже отправлен `status: 2`.
   final Map<String, Set<String>> _readAckSent = {};
+
+  /// Непрочитанные упоминания (`msgs_usr` / live `msg.tagged`) по dlg_id.
+  final Map<String, List<String>> _taggedMsgIds = {};
+
+  /// Уже просмотренные через кнопку `@` в этой сессии (не возвращаем из msgs_usr).
+  final Map<String, Set<String>> _sessionConsumedTaggedIds = {};
+
+  /// Экстренное `@all` (в т.ч. в mute) — одноразовый баннер для UI.
+  String? _emergencyMentionDlgId;
+  String? _emergencyMentionText;
+  String? get emergencyMentionDlgId => _emergencyMentionDlgId;
+  String? get emergencyMentionText => _emergencyMentionText;
 
   ForumDatabase _database = ForumDatabase.defaults();
   ForumDatabase get database => _database;
@@ -207,6 +222,13 @@ class AppState extends ChangeNotifier {
   bool _globalSearchPreloading = false;
   int _globalSearchPreloadDone = 0;
   int _globalSearchPreloadTotal = 0;
+
+  /// Серверный `dlg_search` (debounce 0.3 с), как iOS DialogsList.
+  Timer? _dlgSearchDebounce;
+  int _dlgSearchToken = 0;
+  String _dlgSearchQuery = '';
+  List<DialogsListViewModel> _serverSearchDialogs = const [];
+  bool _dlgSearchLoading = false;
   final Map<String, Future<void>> _olderMessageLoadsInFlight = {};
   String? _openMessageRequestDlgId;
   String? _openMessageRequestId;
@@ -237,6 +259,9 @@ class AppState extends ChangeNotifier {
   bool get globalSearchRibbonVisible => _globalSearchRibbonVisible;
   GlobalSearchScope get globalSearchScope => _globalSearchScope;
   bool get globalSearchPreloading => _globalSearchPreloading;
+  bool get dlgSearchLoading => _dlgSearchLoading;
+  List<DialogsListViewModel> get serverSearchDialogs =>
+      List.unmodifiable(_serverSearchDialogs);
   String? get globalSearchPreloadLabel {
     if (!_globalSearchPreloading) return null;
     if (_globalSearchPreloadTotal <= 0) return 'Загрузка истории…';
@@ -248,6 +273,49 @@ class AppState extends ChangeNotifier {
   bool get isLoading => _connectionStatus == ConnectionStatus.connecting;
   bool get messagesLoading => _messagesLoading;
   bool get messagesLoadingOlder => _messagesLoadingOlder;
+
+  /// Непрочитанные упоминания открытого/любого чата (`msgs_usr`).
+  List<String> taggedMsgIds(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    if (key.isEmpty) return const [];
+    return List.unmodifiable(_taggedMsgIds[key] ?? const []);
+  }
+
+  int taggedMsgCount(String? dlgId) => taggedMsgIds(dlgId).length;
+
+  void clearEmergencyMention({bool notify = true}) {
+    if (_emergencyMentionDlgId == null && _emergencyMentionText == null) {
+      return;
+    }
+    _emergencyMentionDlgId = null;
+    _emergencyMentionText = null;
+    if (notify) notifyListeners();
+  }
+
+  /// Следующий id упоминания для кнопки `@` (по порядку `msgs_usr`).
+  String? peekNextTaggedMsgId(String dlgId) {
+    final ids = _taggedMsgIds[dlgId.trim()];
+    if (ids == null || ids.isEmpty) return null;
+    return ids.first;
+  }
+
+  /// Скролл к упоминанию: убрать id из очереди и синхронизировать флаг списка.
+  String? consumeNextTaggedMsgId(String dlgId) {
+    final key = dlgId.trim();
+    final ids = _taggedMsgIds[key];
+    if (ids == null || ids.isEmpty) return null;
+    final id = ids.removeAt(0);
+    _sessionConsumedTaggedIds.putIfAbsent(key, () => <String>{}).add(id);
+    if (ids.isEmpty) {
+      _taggedMsgIds.remove(key);
+    }
+    final dialog = _findDialog(key);
+    if (dialog != null) {
+      _syncTaggedFlagFromIds(dialog, key);
+    }
+    notifyListeners();
+    return id;
+  }
 
   /// Режим мультивыбора чатов (кнопка-список в шапке, как leftBar iOS).
   bool _dialogsSelectMode = false;
@@ -309,6 +377,7 @@ class AppState extends ChangeNotifier {
       final id = dialog.id?.trim();
       if (id == null || id.isEmpty) continue;
       if (dialog.unread > 0) dialog.unread = 0;
+      _clearDialogTagged(id, dialog);
       _sendReadStatus(dialog, id);
     }
     notifyListeners();
@@ -371,6 +440,7 @@ class AppState extends ChangeNotifier {
     final dialog = _findDialog(dlgId);
     if (dialog == null) return;
     dialog.unread = 0;
+    _clearDialogTagged(dlgId, dialog);
     _sendReadStatus(dialog, dlgId);
     notifyListeners();
   }
@@ -488,20 +558,19 @@ class AppState extends ChangeNotifier {
     _removeDialogLocally(id);
   }
 
-  /// Покинуть группу: WS [`dlg_usr_del`](https://4um.me:7770/api_forum_doc/)
-  /// с `dlg_usr_id` = текущий пользователь.
+  /// Покинуть группу: WS [`dlg_exit`](https://4um.me:7770/api_forum_doc/).
   Future<void> leaveGroup(String dlgId) async {
     final dialog = _findDialog(dlgId);
     if (dialog == null) return;
     final id = dialog.id?.trim() ?? dlgId.trim();
     final me = _profile?.id.trim() ?? '';
-    if (id.isEmpty || me.isEmpty) {
+    if (id.isEmpty || DialogsListViewModel.isPlaceholderDlgId(id) || me.isEmpty) {
       throw StateError('Нет профиля для выхода из группы');
     }
 
     try {
       if (_connectionStatus == ConnectionStatus.connected && _api.isConnected) {
-        final resp = await _api.sendDlgUsrDel(dlgId: id, dlgUsrId: me);
+        final resp = await _api.sendDlgExit(dlgId: id, dlgUsrId: me);
         if (resp['success'] == false) {
           final msg = resp['message']?.toString().trim() ?? '';
           throw StateError(
@@ -520,6 +589,39 @@ class AppState extends ChangeNotifier {
 
     _suppressDlg(id);
     _removeDialogLocally(id);
+  }
+
+  /// Вступить в публичную группу/канал: WS [`dlg_join`](https://4um.me:7770/api_forum_doc/).
+  Future<void> joinPublicDialog(String dlgId) async {
+    final id = dlgId.trim();
+    final me = _profile?.id.trim() ?? '';
+    if (id.isEmpty ||
+        DialogsListViewModel.isPlaceholderDlgId(id) ||
+        me.isEmpty) {
+      throw StateError('Нельзя присоединиться к этому чату');
+    }
+    if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
+      throw StateError('Нет подключения к серверу');
+    }
+
+    final joined = await _api.sendDlgJoin(
+      dlgId: id,
+      dlgUsrId: me,
+      currentUserId: me,
+    );
+    joined.awaitingJoin = false;
+    if (joined.groupAditionalInfo != null) {
+      joined.groupAditionalInfo!.isPublic = true;
+    } else {
+      joined.groupAditionalInfo = GroupAditionalInfoModel(isPublic: true);
+    }
+
+    _suppressedDlgIds.removeWhere((x) => _sameDlgId(x, id));
+    _upsertDialog(joined);
+    _bumpDialog(id);
+    notifyListeners();
+    await selectDialog(id);
+    unawaited(refreshDialogs());
   }
 
   void _suppressDlg(String dlgId) {
@@ -573,6 +675,13 @@ class AppState extends ChangeNotifier {
 
   /// Текст композера текущего чата (для flush `typing` при уходе).
   String _composerText = '';
+
+  /// Вложения в поле ввода (drop / paste / скрепка) — отправка только по Send.
+  final List<MediaFile> _composerPendingAttachments = [];
+  List<MediaFile> get composerPendingAttachments =>
+      List.unmodifiable(_composerPendingAttachments);
+  bool get hasComposerPendingAttachments =>
+      _composerPendingAttachments.isNotEmpty;
 
   /// Локальные черновики по `dlg_id` — превью «Черновик:» в списке чатов.
   final Map<String, String> _composerDrafts = {};
@@ -720,7 +829,7 @@ class AppState extends ChangeNotifier {
     final payload = <String, dynamic>{
       'type': type,
       'id': msgId,
-      'ai': 0,
+      'ai': _aiForDialog(dialog),
     };
     _applyMsgTarget(payload, dialog);
     if (type == 'txt') {
@@ -1021,6 +1130,13 @@ class AppState extends ChangeNotifier {
       _chatScrollAnchors.clear();
       _chatScrollSavers.clear();
       _readAckSent.clear();
+      _taggedMsgIds.clear();
+      _sessionConsumedTaggedIds.clear();
+      _emergencyMentionDlgId = null;
+      _emergencyMentionText = null;
+      _clearServerDialogSearch(notify: false);
+      _groupMembers.clear();
+      _groupMembersLoading.clear();
       _isAuthenticated = false;
       _connectionStatus = ConnectionStatus.idle;
       _connectionError = null;
@@ -1657,7 +1773,138 @@ class AppState extends ChangeNotifier {
     } else {
       _cancelGlobalSearchPreload();
     }
+    _scheduleDlgSearch();
     notifyListeners();
+  }
+
+  void _scheduleDlgSearch() {
+    _dlgSearchDebounce?.cancel();
+    final q = _search.trim();
+    if (q.isEmpty) {
+      _clearServerDialogSearch(notify: false);
+      return;
+    }
+    // Как iOS: только в поиске списка чатов (не медиа-лента).
+    if (_globalSearchRibbonVisible &&
+        _globalSearchScope != GlobalSearchScope.chats) {
+      _clearServerDialogSearch(notify: false);
+      return;
+    }
+    if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
+      return;
+    }
+    _dlgSearchDebounce = Timer(const Duration(milliseconds: 300), () {
+      unawaited(_performServerDialogSearch(q));
+    });
+  }
+
+  void _clearServerDialogSearch({bool notify = true}) {
+    _dlgSearchDebounce?.cancel();
+    _dlgSearchDebounce = null;
+    _dlgSearchToken++;
+    final had = _serverSearchDialogs.isNotEmpty || _dlgSearchLoading;
+    _serverSearchDialogs = const [];
+    _dlgSearchQuery = '';
+    _dlgSearchLoading = false;
+    if (notify && had) notifyListeners();
+  }
+
+  Future<void> _performServerDialogSearch(String query) async {
+    final token = ++_dlgSearchToken;
+    _dlgSearchLoading = true;
+    notifyListeners();
+    try {
+      final results = await _api.searchDialogs(
+        query,
+        currentUserId: _profile?.id,
+      );
+      if (token != _dlgSearchToken || _search.trim() != query) return;
+
+      final localIds = <String>{
+        for (final d in _dialogs)
+          if (!DialogsListViewModel.isPlaceholderDlgId(d.id))
+            (d.id ?? '').trim(),
+      };
+
+      final mapped = <DialogsListViewModel>[];
+      for (final d in results) {
+        final id = (d.id ?? '').trim();
+        if (!DialogsListViewModel.isPlaceholderDlgId(id) &&
+            localIds.any((x) => _sameDlgId(x, id))) {
+          continue;
+        }
+        if (d.isGrp) {
+          d.awaitingJoin = true;
+          final info = d.groupAditionalInfo ?? GroupAditionalInfoModel();
+          info.isPublic = true;
+          d.groupAditionalInfo = info;
+        }
+        mapped.add(d);
+      }
+      _dlgSearchQuery = query;
+      _serverSearchDialogs = mapped;
+    } catch (e) {
+      if (token != _dlgSearchToken) return;
+      ApiLogger.instance.logEvent('DLG_SEARCH', 'ошибка: $e');
+      _serverSearchDialogs = const [];
+    } finally {
+      if (token == _dlgSearchToken) {
+        _dlgSearchLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  /// Открыть чат из списка (в т.ч. результат `dlg_search`).
+  Future<void> openListedDialog(DialogsListViewModel dialog) async {
+    if (dialog.isNewContactWithoutDialog) {
+      await openPrivateChatWithUser(
+        usrId: dialog.usr_id ?? '',
+        name: dialog.chatName,
+        avatar: dialog.avatar,
+        phone: dialog.phone,
+        avatarColor: dialog.avatarColor,
+      );
+      return;
+    }
+
+    final id = dialog.id?.trim() ?? '';
+    if (id.isEmpty) return;
+
+    if (dialog.awaitingJoin ||
+        (_serverSearchDialogs.any((d) => _sameDlgId(d.id, id)) &&
+            !_dialogs.any((d) => _sameDlgId(d.id, id)))) {
+      final card = DialogsListViewModel(
+        id: dialog.id,
+        usr_id: dialog.usr_id,
+        ai: dialog.ai,
+        avatar: dialog.avatar,
+        colAvaId: dialog.colAvaId,
+        avatarColor: dialog.avatarColor,
+        chatName: dialog.chatName,
+        last_msg: dialog.last_msg,
+        last_msg_id: dialog.last_msg_id,
+        last_msg_fr_id: dialog.last_msg_fr_id,
+        last_msg_fr_name: dialog.last_msg_fr_name,
+        last_msg_dttmcr: dialog.last_msg_dttmcr,
+        last_msg_status: dialog.last_msg_status,
+        unread: dialog.unread,
+        tagged: dialog.tagged,
+        chatType: dialog.chatType,
+        isGrp: dialog.isGrp,
+        backgroundUrl: dialog.backgroundUrl,
+        groupAditionalInfo: dialog.groupAditionalInfo,
+        pin: dialog.pin,
+        phone: dialog.phone,
+        fav: dialog.fav,
+        online: dialog.online,
+        awaitingJoin: dialog.isGrp,
+      );
+      _upsertDialog(card);
+      notifyListeners();
+    }
+
+    await selectDialog(id);
   }
 
   void openGlobalSearchRibbon() {
@@ -1674,6 +1921,7 @@ class AppState extends ChangeNotifier {
     _cancelGlobalSearchPreload();
     _globalSearchRibbonVisible = false;
     _activeGlobalSearchHitKey = null;
+    _scheduleDlgSearch();
     notifyListeners();
   }
 
@@ -1685,6 +1933,7 @@ class AppState extends ChangeNotifier {
     } else {
       _cancelGlobalSearchPreload();
     }
+    _scheduleDlgSearch();
     notifyListeners();
   }
 
@@ -1828,10 +2077,12 @@ class AppState extends ChangeNotifier {
 
       final filtered = MsgListResult(
         messages: _withoutDeletedMessages(dlgId, result.messages),
+        msgsUsr: result.msgsUsr,
         isHistory: result.isHistory,
         responseFirstId: result.responseFirstId,
         hasMoreHistory: result.hasMoreHistory,
       );
+      applyMsgsUsr(dlgId, filtered.msgsUsr);
       MsgListMerge.apply(
         dialog: dialog,
         result: filtered,
@@ -2296,6 +2547,33 @@ class AppState extends ChangeNotifier {
           .toList();
     }
 
+    // Серверные результаты `dlg_search` — к локальным без дублей.
+    if (_search.trim().isNotEmpty &&
+        _dlgSearchQuery == _search.trim() &&
+        _serverSearchDialogs.isNotEmpty &&
+        (!_globalSearchRibbonVisible ||
+            _globalSearchScope == GlobalSearchScope.chats)) {
+      final merged = List<DialogsListViewModel>.from(list);
+      for (final remote in _serverSearchDialogs) {
+        final rid = (remote.id ?? '').trim();
+        if (DialogsListViewModel.isPlaceholderDlgId(rid)) {
+          // Заглушки контактов не дедуплицируем по dlg_id.
+          final uid = remote.usr_id?.trim() ?? '';
+          final dup = uid.isNotEmpty &&
+              merged.any(
+                (d) =>
+                    !d.isGrp &&
+                    ReactionUtils.sameUserId(d.usr_id ?? '', uid),
+              );
+          if (!dup) merged.add(remote);
+          continue;
+        }
+        if (merged.any((d) => _sameDlgId(d.id, rid))) continue;
+        merged.add(remote);
+      }
+      list = merged;
+    }
+
     // Порядок как у сервера / после _bumpDialog. Пины стабильно сверху,
     // внутри группы относительный порядок не меняем (List.sort нестабилен).
     final pinned = <DialogsListViewModel>[];
@@ -2427,6 +2705,9 @@ class AppState extends ChangeNotifier {
     if (dlgId.isNotEmpty) payload['dlg_id'] = dlgId;
   }
 
+  /// Как Forum_ios `headerModel.ai`: для ИИ-чата в `msg` нужен ненулевой `ai`.
+  int _aiForDialog(DialogsListViewModel? dialog) => dialog?.ai ?? 0;
+
   Future<void> selectDialog(
     String? id, {
     bool closeGlobalSearch = true,
@@ -2445,9 +2726,14 @@ class AppState extends ChangeNotifier {
         (id == null || !dlgIdsEqual(previousId, id))) {
       _saveComposerDraft(previousId, _composerText);
       flushComposerTyping(dlgId: previousId, text: _composerText);
+      final prev = _findDialog(previousId);
+      if (prev != null && prev.unread <= 0) {
+        _clearDialogTagged(previousId, prev);
+      }
     }
     _clearChatTypingIndicator();
     _composerText = '';
+    _composerPendingAttachments.clear();
     _pendingComposerDraft = null;
     _pendingComposerDraftDlgId = null;
 
@@ -2457,7 +2743,10 @@ class AppState extends ChangeNotifier {
     _selectedId = id;
     _messagesError = null;
     final d = selectedDialog;
-    if (d != null && d.unread > 0) d.unread = 0;
+    if (d != null && d.unread > 0) {
+      d.unread = 0;
+      // tagged не сбрасываем здесь — после msg_list синхронизируем по msgs_usr.
+    }
 
     // Подставить локальный черновик в инпут при открытии чата.
     if (id != null && !DialogsListViewModel.isPlaceholderDlgId(id)) {
@@ -2481,6 +2770,12 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    // Публичная группа до `dlg_join` — только кнопка «Присоединиться».
+    if (d?.awaitingJoin == true) {
+      notifyListeners();
+      return;
+    }
+
     // Хвост только при первом открытии в сессии. Повторный вход в тот же чат
     // не обрезает уже подгруженную историю — иначе сбивается позиция скролла.
     if (!_messagesLoadedFor.any((loaded) => _sameDlgId(loaded, id))) {
@@ -2492,6 +2787,9 @@ class AppState extends ChangeNotifier {
       loadMessages(id);
       unawaited(_restoreTypingDraft(id));
       unawaited(_loadPinnedMessages(id));
+      if (d?.isGrp == true) {
+        unawaited(ensureGroupMembers(id));
+      }
     } else {
       await _restoreMessagesFromCache(id);
       trimDialogToLatestPage(id);
@@ -2573,12 +2871,8 @@ class AppState extends ChangeNotifier {
       if (gen != _loadGeneration || !_sameDlgId(_selectedId, dlgId)) return;
 
       if (dialog != null) {
-        final filtered = MsgListResult(
-          messages: _withoutDeletedMessages(dlgId, result.messages),
-          isHistory: result.isHistory,
-          responseFirstId: result.responseFirstId,
-          hasMoreHistory: result.hasMoreHistory,
-        );
+        final filtered = _withFilteredMessages(result, dlgId);
+        applyMsgsUsr(dlgId, filtered.msgsUsr);
         MsgListMerge.apply(
           dialog: dialog,
           result: filtered,
@@ -2599,6 +2893,7 @@ class AppState extends ChangeNotifier {
         _messagesError = null;
         if (_sameDlgId(_selectedId, dlgId)) {
           _sendReadStatus(dialog, dlgId);
+          _syncTaggedFlagFromIds(dialog, dlgId);
         }
       }
     } on ForumApiException catch (e) {
@@ -2642,12 +2937,8 @@ class AppState extends ChangeNotifier {
         );
         if (!_sameDlgId(_selectedId, dlgId)) return;
 
-        final filtered = MsgListResult(
-          messages: _withoutDeletedMessages(dlgId, result.messages),
-          isHistory: result.isHistory,
-          responseFirstId: result.responseFirstId,
-          hasMoreHistory: result.hasMoreHistory,
-        );
+        final filtered = _withFilteredMessages(result, dlgId);
+        applyMsgsUsr(dlgId, filtered.msgsUsr);
         MsgListMerge.apply(
           dialog: dialog,
           result: filtered,
@@ -2660,6 +2951,7 @@ class AppState extends ChangeNotifier {
         }
         if (_sameDlgId(_selectedId, dlgId)) {
           _sendReadStatus(dialog, dlgId);
+          _syncTaggedFlagFromIds(dialog, dlgId);
         }
         notifyListeners();
       } catch (_) {}
@@ -2772,12 +3064,12 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    final filtered = MsgListResult(
-      messages: _withoutDeletedMessages(dlgId, result.messages),
-      isHistory: result.isHistory,
-      responseFirstId: result.responseFirstId,
-      hasMoreHistory: result.hasMoreHistory,
-    );
+    final filtered = _withFilteredMessages(result, dlgId);
+    applyMsgsUsr(dlgId, filtered.msgsUsr);
+    if (filtered.messages.isEmpty) {
+      notifyListeners();
+      return;
+    }
     MsgListMerge.apply(
       dialog: dialog,
       result: filtered,
@@ -2796,9 +3088,14 @@ class AppState extends ChangeNotifier {
     if (_selectedId != null) {
       _saveComposerDraft(_selectedId, _composerText);
       flushComposerTyping(dlgId: _selectedId!, text: _composerText);
+      final prev = _findDialog(_selectedId!);
+      if (prev != null && prev.unread <= 0) {
+        _clearDialogTagged(_selectedId!, prev);
+      }
     }
     _clearChatTypingIndicator();
     _composerText = '';
+    _composerPendingAttachments.clear();
     _pendingComposerDraft = null;
     _pendingComposerDraftDlgId = null;
     _flushChatScroll(_selectedId);
@@ -3224,9 +3521,6 @@ class AppState extends ChangeNotifier {
     String msgDlgId,
     Map<String, dynamic> data,
   ) {
-    final raw = data['msgs'];
-    if (raw is! List || raw.isEmpty) return;
-
     try {
       final result = _api.parseMsgListResponse(
         {'success': true, 'data': data},
@@ -3235,6 +3529,11 @@ class AppState extends ChangeNotifier {
         currentUserName: _reactionAuthorName,
         isGroupChat: dialog.isGrp,
       );
+      applyMsgsUsr(msgDlgId, result.msgsUsr);
+      if (result.messages.isEmpty) {
+        notifyListeners();
+        return;
+      }
       _mergeMsgListResult(dialog, msgDlgId, result);
     } catch (e) {
       ApiLogger.instance.logEvent('MSG_LIST', 'ошибка push: $e');
@@ -3372,11 +3671,20 @@ class AppState extends ChangeNotifier {
       if (!_sameDlgId(_selectedId, dlgId) && !message.my) {
         dialog.unread++;
       }
+      _registerIncomingTagged(dialog, dlgId, message);
       notifyListeners();
       return;
     }
 
     if (!MsgListMerge.applyIncoming(dialog: dialog, incoming: message)) {
+      final beforeTagged = dialog.tagged;
+      final beforeCount = taggedMsgCount(dlgId);
+      _registerIncomingTagged(dialog, dlgId, message);
+      if (dialog.tagged != beforeTagged ||
+          taggedMsgCount(dlgId) != beforeCount ||
+          _emergencyMentionDlgId != null) {
+        notifyListeners();
+      }
       return;
     }
 
@@ -3393,6 +3701,7 @@ class AppState extends ChangeNotifier {
     if (!isOpen && !message.my) {
       dialog.unread++;
     }
+    _registerIncomingTagged(dialog, dlgId, message);
     if (isOpen && isDialogHistoryReady(dlgId) && !message.my) {
       _sendReadStatus(dialog, dlgId);
     }
@@ -3537,19 +3846,22 @@ class AppState extends ChangeNotifier {
 
     var changed = false;
     for (final m in dialog.messages) {
-      if (ids.contains(m.id) && m.status != status) {
-        m.status = status;
-        changed = true;
-      }
+      if (!_statusIdsMatch(m, ids) || m.status == status) continue;
+      // Не понижать уже прочитанное/доставленное.
+      if (m.status >= 0 && status >= 0 && status < m.status) continue;
+      m.status = status;
+      changed = true;
     }
 
     // DialogsList.onRecvStatus — превью последнего исходящего в списке чатов.
     if (myId.isNotEmpty &&
-        dialog.last_msg_fr_id == myId &&
+        ReactionUtils.sameUserId(dialog.last_msg_fr_id, myId) &&
         dialog.last_msg_id.isNotEmpty &&
-        ids.contains(dialog.last_msg_id)) {
-      dialog.last_msg_status = status;
-      changed = true;
+        ids.contains(dialog.last_msg_id.trim())) {
+      if (dialog.last_msg_status < 0 || status >= dialog.last_msg_status) {
+        dialog.last_msg_status = status;
+        changed = true;
+      }
     }
 
     if (changed) notifyListeners();
@@ -3584,9 +3896,101 @@ class AppState extends ChangeNotifier {
     acked.addAll(unreadIds);
   }
 
+  /// Применить `msgs_usr` из `msg_list` (даже при пустом `msgs`).
+  void applyMsgsUsr(String dlgId, List<String> msgsUsr) {
+    final key = dlgId.trim();
+    if (key.isEmpty) return;
+
+    final consumed = _sessionConsumedTaggedIds[key] ?? const <String>{};
+    final filtered = <String>[];
+    final seen = <String>{};
+    for (final raw in msgsUsr) {
+      final id = raw.trim();
+      if (id.isEmpty || seen.contains(id) || consumed.contains(id)) continue;
+      seen.add(id);
+      filtered.add(id);
+    }
+
+    if (filtered.isEmpty) {
+      _taggedMsgIds.remove(key);
+    } else {
+      _taggedMsgIds[key] = filtered;
+    }
+
+    final dialog = _findDialog(key);
+    if (dialog != null) {
+      _syncTaggedFlagFromIds(dialog, key);
+    }
+  }
+
+  void _registerIncomingTagged(
+    DialogsListViewModel dialog,
+    String dlgId,
+    MessageViewModel message,
+  ) {
+    if (message.my || message.tagged <= 0) return;
+    final msgId = message.id.trim();
+    if (msgId.isEmpty) return;
+
+    final key = dlgId.trim();
+    final consumed = _sessionConsumedTaggedIds[key];
+    if (consumed != null && consumed.contains(msgId)) return;
+
+    final list = _taggedMsgIds.putIfAbsent(key, () => <String>[]);
+    if (!list.contains(msgId)) {
+      list.add(msgId);
+    }
+    dialog.tagged = 1;
+
+    final text = message.body.isNotEmpty ? message.body : message.text;
+    if (MentionMarkup.isEmergencyAllMention(text)) {
+      _emergencyMentionDlgId = key;
+      final name = dialog.chatName.trim();
+      _emergencyMentionText = name.isEmpty
+          ? 'Экстренное оповещение @all'
+          : 'Экстренное оповещение @all · $name';
+    }
+  }
+
+  void _syncTaggedFlagFromIds(DialogsListViewModel dialog, String dlgId) {
+    final ids = _taggedMsgIds[dlgId.trim()];
+    final hasIds = ids != null && ids.isNotEmpty;
+    // В открытом чате unread уже 0 — флаг держим по локальной очереди @.
+    if (_sameDlgId(_selectedId, dlgId)) {
+      dialog.tagged = hasIds ? 1 : 0;
+      return;
+    }
+    // В списке: как сервер — только при unread > 0 (или живой msg.tagged).
+    if (!hasIds || dialog.unread <= 0) {
+      if (!hasIds) dialog.tagged = 0;
+    } else {
+      dialog.tagged = 1;
+    }
+  }
+
+  void _clearDialogTagged(String dlgId, DialogsListViewModel dialog) {
+    final key = dlgId.trim();
+    dialog.tagged = 0;
+    _taggedMsgIds.remove(key);
+  }
+
+  MsgListResult _withFilteredMessages(
+    MsgListResult result,
+    String dlgId,
+  ) {
+    return MsgListResult(
+      messages: _withoutDeletedMessages(dlgId, result.messages),
+      msgsUsr: result.msgsUsr,
+      isHistory: result.isHistory,
+      responseFirstId: result.responseFirstId,
+      hasMoreHistory: result.hasMoreHistory,
+    );
+  }
+
   static int _parseStatus(dynamic value) {
     if (value is int) return value;
-    return int.tryParse(value?.toString() ?? '') ?? 0;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString().trim() ?? '') ?? 0;
   }
 
   static Set<String> _parseStatusIds(String raw) {
@@ -3597,17 +4001,30 @@ class AppState extends ChangeNotifier {
         .toSet();
   }
 
+  static bool _statusIdsMatch(MessageViewModel m, Set<String> ids) {
+    final id = m.id.trim();
+    final hash = m.hash.trim();
+    if (id.isNotEmpty && ids.contains(id)) return true;
+    if (hash.isNotEmpty && ids.contains(hash)) return true;
+    return false;
+  }
+
   void _mergeMsgListResult(
     DialogsListViewModel dialog,
     String dlgId,
     MsgListResult result,
   ) {
+    applyMsgsUsr(dlgId, result.msgsUsr);
     final filteredMessages = _withoutDeletedMessages(dlgId, result.messages);
-    if (filteredMessages.isEmpty) return;
+    if (filteredMessages.isEmpty) {
+      notifyListeners();
+      return;
+    }
 
     final beforeCount = dialog.messages.length;
     final filtered = MsgListResult(
       messages: filteredMessages,
+      msgsUsr: result.msgsUsr,
       isHistory: result.isHistory,
       responseFirstId: result.responseFirstId,
       hasMoreHistory: result.hasMoreHistory,
@@ -3630,6 +4047,7 @@ class AppState extends ChangeNotifier {
     final added = dialog.messages.length - beforeCount;
     if (added <= 0 && !result.isHistory) {
       // Все сообщения уже были в списке (дедупликация).
+      notifyListeners();
       return;
     }
 
@@ -3645,6 +4063,7 @@ class AppState extends ChangeNotifier {
       if (!result.isHistory) {
         _sendReadStatus(dialog, dlgId);
       }
+      _syncTaggedFlagFromIds(dialog, dlgId);
     }
 
     notifyListeners();
@@ -3668,6 +4087,10 @@ class AppState extends ChangeNotifier {
       if (old != null && old.chatMuted) {
         d.chatMuted = true;
       }
+      // После dlg_join карточка уже в dlg_list — сбрасываем awaitingJoin.
+      if (old != null && old.awaitingJoin) {
+        d.awaitingJoin = false;
+      }
     }
     _applyLocalDialogPrefs(incoming);
 
@@ -3688,6 +4111,14 @@ class AppState extends ChangeNotifier {
             ReactionUtils.sameUserId(d.usr_id ?? '', uid),
       );
       if (!already) incoming.insert(0, draft);
+    }
+
+    // Публичные чаты из dlg_search до вступления не в dlg_list — сохраняем.
+    for (final pending in _dialogs.where((d) => d.awaitingJoin)) {
+      final id = pending.id?.trim() ?? '';
+      if (DialogsListViewModel.isPlaceholderDlgId(id)) continue;
+      if (incoming.any((d) => _sameDlgId(d.id, id))) continue;
+      incoming.insert(0, pending);
     }
 
     return incoming;
@@ -3921,6 +4352,7 @@ class AppState extends ChangeNotifier {
       my: true,
       body: trimmed,
       text: trimmed,
+      ai: _aiForDialog(dialog),
       fr_name: _profile?.name ?? 'Вы',
       fr_id: _profile?.id,
       dttmcr: nowIso,
@@ -3955,7 +4387,7 @@ class AppState extends ChangeNotifier {
       final payload = <String, dynamic>{
         'type': 'txt',
         'hash': hash,
-        'ai': 0,
+        'ai': _aiForDialog(dialog),
         'body': trimmed,
       };
       _applyMsgTarget(payload, dialog);
@@ -3963,6 +4395,11 @@ class AppState extends ChangeNotifier {
         payload['prn_id'] = effectivePrnId;
       }
       _api.sendMsg(payload);
+      // После ухода в сокет — «отправлено» (одна галочка), не часы.
+      if (skeleton.status < 0) {
+        skeleton.status = 0;
+        notifyListeners();
+      }
     } catch (e) {
       ApiLogger.instance.logEvent('SEND', 'txt: $e');
       notifyListeners();
@@ -3993,6 +4430,7 @@ class AppState extends ChangeNotifier {
       my: true,
       body: cap,
       text: cap,
+      ai: _aiForDialog(dialog),
       fr_name: _profile?.name ?? 'Вы',
       fr_id: _profile?.id,
       dttmcr: nowIso,
@@ -4085,11 +4523,15 @@ class AppState extends ChangeNotifier {
       final payload = <String, dynamic>{
         'type': 'media',
         'hash': hash,
-        'ai': 0,
+        'ai': _aiForDialog(dialog),
         'body': bodyJson,
       };
       _applyMsgTarget(payload, dialog);
       _api.sendMsg(payload);
+      if (skeleton.status < 0) {
+        skeleton.status = 0;
+        notifyListeners();
+      }
     } catch (e) {
       ApiLogger.instance.logEvent('UPLOAD', 'media: $e');
       notifyListeners();
@@ -4300,6 +4742,57 @@ class AppState extends ChangeNotifier {
     return _api.fetchMsgReadList(dlgId: dlgId, msgId: msgId);
   }
 
+  /// Участники групп для `@`-упоминаний (`dlg_info`), по dlg_id.
+  final Map<String, List<DlgInfoMember>> _groupMembers = {};
+  final Set<String> _groupMembersLoading = {};
+
+  List<DlgInfoMember> groupMembers(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    if (key.isEmpty) return const [];
+    return List.unmodifiable(_groupMembers[key] ?? const []);
+  }
+
+  bool isGroupMembersLoading(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    return key.isNotEmpty && _groupMembersLoading.contains(key);
+  }
+
+  /// Подтянуть участников группы (кэш). Как iOS перед mention-пикером.
+  Future<void> ensureGroupMembers(String dlgId, {bool force = false}) async {
+    final key = dlgId.trim();
+    if (key.isEmpty || DialogsListViewModel.isPlaceholderDlgId(key)) return;
+    if (!force && _groupMembers.containsKey(key)) return;
+    if (_groupMembersLoading.contains(key)) return;
+
+    _groupMembersLoading.add(key);
+    try {
+      final info = await fetchDlgInfo(key);
+      _groupMembers[key] = List<DlgInfoMember>.from(info.users);
+      notifyListeners();
+    } catch (e) {
+      ApiLogger.instance.logEvent('DLG_INFO', 'members for @$key: $e');
+    } finally {
+      _groupMembersLoading.remove(key);
+      notifyListeners();
+    }
+  }
+
+  List<MentionCandidate> mentionCandidatesFor(
+    String dlgId, {
+    required String query,
+  }) {
+    final me = _profile?.id.trim() ?? '';
+    final members = groupMembers(dlgId)
+        .where(
+          (m) => me.isEmpty || !ReactionUtils.sameUserId(m.id, me),
+        )
+        .toList();
+    return MentionCandidate.filter(
+      members: members,
+      query: query,
+    );
+  }
+
   /// Метаданные диалога / участники (`dlg_info`) для экрана профиля собеседника.
   Future<DlgInfoResult> fetchDlgInfo(String dlgId) {
     return _api.fetchDlgInfo(
@@ -4507,6 +5000,7 @@ class AppState extends ChangeNotifier {
         nowIso: nowIso,
         nowTime: _nowTime(),
         sameAuthorAsPrev: sameAuthorAsPrev,
+        ai: _aiForDialog(dialog),
       );
 
       _appendOutgoingSkeleton(
@@ -4522,6 +5016,7 @@ class AppState extends ChangeNotifier {
             dlgId: dlgId,
             hash: hash,
             prnId: prnId,
+            ai: _aiForDialog(dialog),
           ),
         );
       } catch (_) {
@@ -4552,6 +5047,7 @@ class AppState extends ChangeNotifier {
       my: true,
       body: text,
       text: text,
+      ai: _aiForDialog(dialog),
       fr_name: _profile?.name ?? 'Вы',
       fr_id: _profile?.id,
       dttmcr: nowIso,
@@ -4569,11 +5065,15 @@ class AppState extends ChangeNotifier {
       final payload = <String, dynamic>{
         'type': 'txt',
         'hash': hash,
-        'ai': 0,
+        'ai': _aiForDialog(dialog),
         'body': text,
       };
       _applyMsgTarget(payload, dialog);
       _api.sendMsg(payload);
+      if (skeleton.status < 0) {
+        skeleton.status = 0;
+        notifyListeners();
+      }
     } catch (_) {
       skeleton.status = 0;
       notifyListeners();
@@ -4656,9 +5156,31 @@ class AppState extends ChangeNotifier {
     return text;
   }
 
-  /// Отправка файлов, перетащенных в чат из Finder/Explorer.
+  /// Добавить вложения в композер (без отправки). Текст черновика не трогаем.
+  void addComposerAttachments(List<MediaFile> files) {
+    if (files.isEmpty) return;
+    final room =
+        MediaMessageLayout.maxFiles - _composerPendingAttachments.length;
+    if (room <= 0) return;
+    _composerPendingAttachments.addAll(files.take(room));
+    notifyListeners();
+  }
+
+  void removeComposerAttachmentAt(int index) {
+    if (index < 0 || index >= _composerPendingAttachments.length) return;
+    _composerPendingAttachments.removeAt(index);
+    notifyListeners();
+  }
+
+  void clearComposerAttachments({bool notify = true}) {
+    if (_composerPendingAttachments.isEmpty) return;
+    _composerPendingAttachments.clear();
+    if (notify) notifyListeners();
+  }
+
+  /// Drop / paste / скрепка → очередь в поле ввода; отправка только по Send.
   /// [dlgId] — целевой диалог (drop на строку в списке); иначе текущий.
-  Future<void> sendDroppedAttachments(
+  Future<void> stageDroppedAttachments(
     List<MediaFile> files, {
     String? dlgId,
   }) async {
@@ -4670,23 +5192,42 @@ class AppState extends ChangeNotifier {
       await selectDialog(targetId);
     }
     if (selectedDialog == null || selectedDialog!.id != targetId) return;
+    addComposerAttachments(files.take(MediaMessageLayout.maxFiles).toList());
+  }
 
-    final batch = files.take(10).toList();
+  /// Совместимость: раньше drop сразу слал в чат.
+  Future<void> sendDroppedAttachments(
+    List<MediaFile> files, {
+    String? dlgId,
+  }) =>
+      stageDroppedAttachments(files, dlgId: dlgId);
+
+  /// Отправить очередь композера + подпись; очищает pending.
+  Future<void> sendComposerPending({String caption = ''}) async {
+    if (_composerPendingAttachments.isEmpty) return;
+    final pending = List<MediaFile>.from(_composerPendingAttachments);
+    clearComposerAttachments(notify: false);
+
     final media = <MediaFile>[];
     final docs = <MediaFile>[];
-    for (final f in batch) {
+    for (final f in pending) {
       if (ChatFileDnd.isMediaAttachment(f)) {
         media.add(f);
       } else {
         docs.add(f);
       }
     }
+
+    final cap = caption.trim();
     if (media.isNotEmpty) {
-      await sendMediaMessage(media);
+      await sendMediaMessage(media, caption: cap);
+    } else if (cap.isNotEmpty) {
+      await sendMessage(EmoticonReplacer.replace(cap));
     }
     if (docs.isNotEmpty) {
       await sendFileMessage(docs);
     }
+    notifyListeners();
   }
 
   Future<void> sendFileMessage(List<MediaFile> files) async {
@@ -4713,6 +5254,7 @@ class AppState extends ChangeNotifier {
       my: true,
       body: '',
       text: '',
+      ai: _aiForDialog(dialog),
       fr_name: _profile?.name ?? 'Вы',
       fr_id: _profile?.id,
       dttmcr: nowIso,
@@ -4774,11 +5316,15 @@ class AppState extends ChangeNotifier {
       final payload = <String, dynamic>{
         'type': 'file',
         'hash': hash,
-        'ai': 0,
+        'ai': _aiForDialog(dialog),
         'body': bodyJson,
       };
       _applyMsgTarget(payload, dialog);
       _api.sendMsg(payload);
+      if (skeleton.status < 0) {
+        skeleton.status = 0;
+        notifyListeners();
+      }
     } catch (e) {
       ApiLogger.instance.logEvent('UPLOAD', 'file: $e');
       notifyListeners();

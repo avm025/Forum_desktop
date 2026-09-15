@@ -7,6 +7,7 @@ import '../calls/call_message_display.dart';
 import '../models/chat_type.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/group_additional_info_model.dart';
+import '../utils/reaction_utils.dart';
 import '../utils/utf16.dart';
 
 /// Преобразование JSON диалога с сервера в [DialogsListViewModel].
@@ -119,6 +120,7 @@ class DialogMapper {
           : _formatTime(json['dttmup']?.toString() ?? ''),
       last_msg_status: last.status,
       unread: _parseInt(json['unread']),
+      tagged: _parseInt(json['tagged']),
       chatType: isGrp ? ChatType.groupChat : ChatType.privateChat,
       isGrp: isGrp,
       pin: _parseInt(json['pin']),
@@ -129,6 +131,9 @@ class DialogMapper {
         colAvalId: colAvaId,
         desc: json['about']?.toString(),
         nick: json['name']?.toString(),
+        isPublic: _parseFlag(json['public']) ||
+            _parseFlag(json['is_public']),
+        words: json['words']?.toString(),
       ),
     );
   }
@@ -199,9 +204,14 @@ class DialogMapper {
     }
 
     final id = map['id']?.toString() ?? '';
-    final status = map['status'] is int
+    final parsedStatus = map['status'] is int
         ? map['status'] as int
-        : int.tryParse(map['status']?.toString() ?? '') ?? -2;
+        : int.tryParse(map['status']?.toString() ?? '');
+    final isMine = currentUserId != null &&
+        currentUserId.isNotEmpty &&
+        ReactionUtils.sameUserId(frId, currentUserId);
+    // Для своих last_msg без status — 0 (отправлено), иначе галочки не видны.
+    final status = parsedStatus ?? (isMine ? 0 : -2);
     final time = _formatTime(map['dttmcr']?.toString() ?? '');
 
     return _LastMsg(

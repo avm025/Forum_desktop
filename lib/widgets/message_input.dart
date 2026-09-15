@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -11,11 +12,14 @@ import '../services/api_logger.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../utils/attachment_selection.dart';
+import '../utils/chat_file_dnd.dart';
 import '../utils/cursor_position.dart';
 import '../utils/emoticon_replacer.dart';
 import '../utils/file_kind.dart';
 import '../utils/media_message_layout.dart';
+import '../utils/mention_markup.dart';
 import '../utils/utf16.dart';
+import 'mention_picker.dart';
 import 'message_composer_reply.dart';
 
 /// Поле ввода сообщения: скрепка, текст, кнопка отправки/микрофон.
@@ -37,6 +41,12 @@ class _MessageInputState extends State<MessageInput> {
   bool _syncingText = false;
   bool _pasteBusy = false;
 
+  /// Выбранные `@label` → usr_id для MarkdownV2 при отправке.
+  final Map<String, String> _mentionTokens = {};
+  MentionQuery? _mentionQuery;
+  List<MentionCandidate> _mentionCandidates = const [];
+  int _mentionIndex = 0;
+
   @override
   void initState() {
     super.initState();
@@ -53,28 +63,18 @@ class _MessageInputState extends State<MessageInput> {
       'composer got native image ${saved.fileName}',
     );
     if (!mounted) return;
-    final caption = _controller.text;
-    _syncingText = true;
-    _controller.clear();
-    _syncingText = false;
-    if (_hasText) setState(() => _hasText = false);
-    context.read<AppState>().reportComposerText('');
-    unawaited(
-      context.read<AppState>().sendMediaMessage(
-        [
-          MediaFile(
-            fname: saved.fileName,
-            title: saved.fileName,
-            kind: 'jpeg',
-            size: saved.size,
-            URL: saved.path,
-            width: saved.width.isNotEmpty ? saved.width : '248',
-            height: saved.height.isNotEmpty ? saved.height : '248',
-          ),
-        ],
-        caption: caption,
+    // Прикрепляем к полю ввода; текст черновика не трогаем.
+    context.read<AppState>().addComposerAttachments([
+      MediaFile(
+        fname: saved.fileName,
+        title: saved.fileName,
+        kind: 'jpeg',
+        size: saved.size,
+        URL: saved.path,
+        width: saved.width.isNotEmpty ? saved.width : '248',
+        height: saved.height.isNotEmpty ? saved.height : '248',
       ),
-    );
+    ]);
   }
 
   @override
@@ -91,6 +91,34 @@ class _MessageInputState extends State<MessageInput> {
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    if (_mentionQuery != null && _mentionCandidates.isNotEmpty) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+        setState(() {
+          _mentionIndex = (_mentionIndex + 1) % _mentionCandidates.length;
+        });
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+        setState(() {
+          _mentionIndex =
+              (_mentionIndex - 1 + _mentionCandidates.length) %
+                  _mentionCandidates.length;
+        });
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        _closeMentionPicker();
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.enter ||
+          event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+          event.logicalKey == LogicalKeyboardKey.tab) {
+        _insertMention(_mentionCandidates[
+            _mentionIndex.clamp(0, _mentionCandidates.length - 1)]);
+        return KeyEventResult.handled;
+      }
+    }
 
     // Enter — отправка; Shift+Enter — новая строка + каретка в поле.
     if (event.logicalKey == LogicalKeyboardKey.enter ||
@@ -202,30 +230,18 @@ class _MessageInputState extends State<MessageInput> {
     );
 
     if (!mounted) return true;
-    final caption = _controller.text;
-    _syncingText = true;
-    _controller.clear();
-    _syncingText = false;
-    setState(() => _hasText = false);
-    context.read<AppState>().reportComposerText('');
-
-    // Не await upload — UI свободен; ошибки в логе MEDIA/UPLOAD.
-    unawaited(
-      context.read<AppState>().sendMediaMessage(
-        [
-          MediaFile(
-            fname: saved.fileName,
-            title: saved.fileName,
-            kind: 'jpeg',
-            size: saved.size,
-            URL: saved.path,
-            width: saved.width.isNotEmpty ? saved.width : '248',
-            height: saved.height.isNotEmpty ? saved.height : '248',
-          ),
-        ],
-        caption: caption,
+    // Прикрепляем; ранее введённый текст остаётся.
+    context.read<AppState>().addComposerAttachments([
+      MediaFile(
+        fname: saved.fileName,
+        title: saved.fileName,
+        kind: 'jpeg',
+        size: saved.size,
+        URL: saved.path,
+        width: saved.width.isNotEmpty ? saved.width : '248',
+        height: saved.height.isNotEmpty ? saved.height : '248',
       ),
-    );
+    ]);
     return true;
   }
 
@@ -258,6 +274,89 @@ class _MessageInputState extends State<MessageInput> {
     final has = _controller.text.trim().isNotEmpty;
     if (has != _hasText) setState(() => _hasText = has);
     context.read<AppState>().reportComposerText(_controller.text);
+    _syncMentionPicker();
+  }
+
+  void _closeMentionPicker() {
+    if (_mentionQuery == null && _mentionCandidates.isEmpty) return;
+    setState(() {
+      _mentionQuery = null;
+      _mentionCandidates = const [];
+      _mentionIndex = 0;
+    });
+  }
+
+  void _syncMentionPicker() {
+    final state = context.read<AppState>();
+    final dialog = state.selectedDialog;
+    if (dialog == null || !dialog.isGrp || dialog.awaitingJoin) {
+      if (_mentionQuery != null) _closeMentionPicker();
+      return;
+    }
+
+    final sel = _controller.selection;
+    if (!sel.isValid || !sel.isCollapsed) {
+      if (_mentionQuery != null) _closeMentionPicker();
+      return;
+    }
+
+    final query = MentionQuery.atCaret(_controller.text, sel.baseOffset);
+    if (query == null) {
+      if (_mentionQuery != null) _closeMentionPicker();
+      return;
+    }
+
+    final dlgId = dialog.id?.trim() ?? '';
+    if (dlgId.isEmpty) return;
+    if (state.groupMembers(dlgId).isEmpty) {
+      unawaited(state.ensureGroupMembers(dlgId));
+    }
+
+    final candidates = state.mentionCandidatesFor(dlgId, query: query.query);
+    setState(() {
+      _mentionQuery = query;
+      _mentionCandidates = candidates;
+      if (_mentionIndex >= candidates.length) {
+        _mentionIndex = 0;
+      }
+    });
+  }
+
+  void _insertMention(MentionCandidate candidate) {
+    final q = _mentionQuery;
+    if (q == null) return;
+    final text = _controller.text;
+    final caret = _controller.selection.isValid
+        ? _controller.selection.baseOffset
+        : text.length;
+    final label = candidate.insertLabel;
+    final token = '@$label';
+    final insertion = '$token ';
+    final next = text.replaceRange(q.atIndex, caret, insertion);
+    final newCaret = q.atIndex + insertion.length;
+
+    _mentionTokens[token] = candidate.usrId;
+
+    _syncingText = true;
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: newCaret),
+    );
+    _syncingText = false;
+    setState(() {
+      _hasText = next.trim().isNotEmpty;
+      _mentionQuery = null;
+      _mentionCandidates = const [];
+      _mentionIndex = 0;
+    });
+    context.read<AppState>().reportComposerText(next);
+    _focusNode.requestFocus();
+  }
+
+  String _bodyForSend(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return trimmed;
+    return MentionMarkup.applyTokens(trimmed, _mentionTokens);
   }
 
   void _scheduleDialogBinding(AppState state) {
@@ -272,10 +371,12 @@ class _MessageInputState extends State<MessageInput> {
       if (id != _boundDlgId) {
         _boundDlgId = id;
         _appliedDraftEpoch = -1;
+        _mentionTokens.clear();
         _syncingText = true;
         _controller.clear();
         _syncingText = false;
         if (_hasText) setState(() => _hasText = false);
+        _closeMentionPicker();
       }
       _tryApplyDraft(s, id);
     });
@@ -304,21 +405,37 @@ class _MessageInputState extends State<MessageInput> {
   }
 
   Future<void> _send() async {
-    final text = EmoticonReplacer.replace(_controller.text.trim());
-    if (text.isEmpty) return;
-
     final state = context.read<AppState>();
+    final text = _bodyForSend(EmoticonReplacer.replace(_controller.text));
     final editing = state.editingMessage;
+    final hasPending = state.hasComposerPendingAttachments;
+
+    if (editing != null) {
+      if (text.isEmpty) return;
+      _syncingText = true;
+      _controller.clear();
+      _syncingText = false;
+      _mentionTokens.clear();
+      _closeMentionPicker();
+      if (_hasText) setState(() => _hasText = false);
+      state.reportComposerText('');
+      await state.submitEditedMessage(text);
+      return;
+    }
+
+    if (!hasPending && text.isEmpty) return;
 
     // Очищаем поле до append скелета — пузырь и текст в одном кадре.
     _syncingText = true;
     _controller.clear();
     _syncingText = false;
+    _mentionTokens.clear();
+    _closeMentionPicker();
     if (_hasText) setState(() => _hasText = false);
     state.reportComposerText('');
 
-    if (editing != null) {
-      await state.submitEditedMessage(text);
+    if (hasPending) {
+      await state.sendComposerPending(caption: text);
       return;
     }
     await state.sendMessage(text);
@@ -391,15 +508,7 @@ class _MessageInputState extends State<MessageInput> {
         .toList();
 
     if (!mounted) return;
-    context.read<AppState>().sendMediaMessage(
-          files,
-          caption: _controller.text,
-        );
-    _syncingText = true;
-    _controller.clear();
-    _syncingText = false;
-    setState(() => _hasText = false);
-    context.read<AppState>().reportComposerText('');
+    context.read<AppState>().addComposerAttachments(files);
   }
 
   Future<void> _pickVideos() async {
@@ -422,15 +531,7 @@ class _MessageInputState extends State<MessageInput> {
         .toList();
 
     if (!mounted) return;
-    context.read<AppState>().sendMediaMessage(
-          files,
-          caption: _controller.text,
-        );
-    _syncingText = true;
-    _controller.clear();
-    _syncingText = false;
-    setState(() => _hasText = false);
-    context.read<AppState>().reportComposerText('');
+    context.read<AppState>().addComposerAttachments(files);
   }
 
   Future<void> _pickFile() async {
@@ -453,7 +554,29 @@ class _MessageInputState extends State<MessageInput> {
         .toList();
 
     if (!mounted) return;
-    context.read<AppState>().sendFileMessage(files);
+    context.read<AppState>().addComposerAttachments(files);
+  }
+
+  Widget _pendingStrip(AppState state, ForumPalette p) {
+    final pending = state.composerPendingAttachments;
+    if (pending.isEmpty) return const SizedBox.shrink();
+
+    return SizedBox(
+      height: 72,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        scrollDirection: Axis.horizontal,
+        itemCount: pending.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) {
+          final file = pending[i];
+          return _ComposerPendingThumb(
+            file: file,
+            onRemove: () => state.removeComposerAttachmentAt(i),
+          );
+        },
+      ),
+    );
   }
 
   @override
@@ -497,6 +620,8 @@ class _MessageInputState extends State<MessageInput> {
     }
 
     final banner = editing ?? replyTo;
+    final hasPending = state.hasComposerPendingAttachments;
+    final showSend = _hasText || hasPending || editing != null;
 
     return Listener(
       behavior: HitTestBehavior.translucent,
@@ -521,17 +646,34 @@ class _MessageInputState extends State<MessageInput> {
                   }
                 },
               ),
+            _pendingStrip(state, p),
+            if (_mentionQuery != null && _mentionCandidates.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: MentionPicker(
+                  candidates: _mentionCandidates,
+                  selectedIndex: _mentionIndex,
+                  onHighlight: (i) => setState(() => _mentionIndex = i),
+                  onSelect: _insertMention,
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   InkWell(
-                    onTap: _openAttachMenu,
+                    onTap: editing != null ? null : _openAttachMenu,
                     customBorder: const CircleBorder(),
                     child: Padding(
                       padding: const EdgeInsets.all(2),
-                      child: Icon(Icons.attach_file, color: p.text2, size: 24),
+                      child: Icon(
+                        Icons.attach_file,
+                        color: editing != null
+                            ? p.text2.withValues(alpha: 0.4)
+                            : p.text2,
+                        size: 24,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -572,9 +714,7 @@ class _MessageInputState extends State<MessageInput> {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        _hasText || editing != null
-                            ? Icons.send_rounded
-                            : Icons.mic,
+                        showSend ? Icons.send_rounded : Icons.mic,
                         color: Colors.white,
                         size: 20,
                       ),
@@ -585,6 +725,108 @@ class _MessageInputState extends State<MessageInput> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ComposerPendingThumb extends StatelessWidget {
+  final MediaFile file;
+  final VoidCallback onRemove;
+
+  const _ComposerPendingThumb({
+    required this.file,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    final isMedia = ChatFileDnd.isMediaAttachment(file);
+
+    return SizedBox(
+      width: 56,
+      height: 56,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: ColoredBox(
+                color: p.bg3,
+                child: isMedia ? _mediaPreview() : _filePreview(p),
+              ),
+            ),
+          ),
+          if (file.isVideo)
+            const Center(
+              child: Icon(Icons.play_circle_fill, color: Colors.white70, size: 22),
+            ),
+          Positioned(
+            top: -4,
+            right: -4,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: onRemove,
+                customBorder: const CircleBorder(),
+                child: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    color: p.bg2,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: p.border1),
+                  ),
+                  child: Icon(Icons.close, size: 12, color: p.text1),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mediaPreview() {
+    final bytes = file.bytes;
+    if (bytes != null && bytes.isNotEmpty) {
+      return Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true);
+    }
+    final path = file.URL?.trim() ?? '';
+    if (path.isNotEmpty) {
+      try {
+        final local = path.startsWith('file://')
+            ? Uri.parse(path).toFilePath()
+            : path;
+        final f = File(local);
+        if (f.existsSync()) {
+          return Image.file(f, fit: BoxFit.cover, gaplessPlayback: true);
+        }
+      } catch (_) {}
+    }
+    return const Center(
+      child: Icon(Icons.image_outlined, color: Colors.white54, size: 22),
+    );
+  }
+
+  Widget _filePreview(ForumPalette p) {
+    final name = (file.title.isNotEmpty ? file.title : file.fname).trim();
+    return Padding(
+      padding: const EdgeInsets.all(6),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.insert_drive_file_outlined, color: p.purple, size: 20),
+          const SizedBox(height: 2),
+          Text(
+            name.isEmpty ? 'файл' : name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: p.text2, fontSize: 9),
+          ),
+        ],
       ),
     );
   }

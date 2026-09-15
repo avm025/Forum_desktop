@@ -65,13 +65,14 @@ class ForwardMapper {
     required String dlgId,
     required String hash,
     required String prnId,
+    int ai = 0,
   }) {
     final type = serverType(source);
     final payload = <String, dynamic>{
       'type': type,
       'hash': hash,
       'dlg_id': dlgId,
-      'ai': 0,
+      'ai': ai,
       'repost': 1,
       'prn_id': prnId,
     };
@@ -116,6 +117,7 @@ class ForwardMapper {
     required String nowIso,
     required String nowTime,
     required bool sameAuthorAsPrev,
+    int ai = 0,
   }) {
     final type = serverType(source);
     MediaFile? prnThumb;
@@ -129,6 +131,7 @@ class ForwardMapper {
       my: true,
       body: source.body,
       text: source.text,
+      ai: ai,
       fr_name: profileName,
       fr_id: profileId,
       dttmcr: nowIso,

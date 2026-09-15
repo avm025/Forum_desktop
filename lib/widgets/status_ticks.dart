@@ -21,18 +21,20 @@ class StatusTicks extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    if (status < -1) return const SizedBox.shrink();
+    // -2 и ниже — «нет статуса» (превью входящих). Для исходящих всё равно
+    // показываем «отправлено», иначе галочки пропадают.
+    final effective = status < -1 ? 0 : status;
 
-    if (status == -1) {
+    if (effective == -1) {
       return Icon(Icons.schedule, size: size, color: color ?? p.text2);
     }
 
-    final read = status >= 2;
+    final read = effective >= 2;
     final tickColor = read
         ? (readColor ?? p.lime)
         : (color ?? p.text2);
 
-    if (status == 0) {
+    if (effective == 0) {
       return Icon(Icons.check, size: size, color: tickColor);
     }
 
