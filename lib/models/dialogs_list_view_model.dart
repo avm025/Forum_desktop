@@ -13,6 +13,8 @@ class DialogsListViewModel {
   final int colAvaId;
   List<String>? avatarColor;
   String chatName;
+  /// Доп. имена/ники для локального поиска (не для отображения).
+  String searchExtra;
   String last_msg;
   String last_msg_id;
   String last_msg_fr_id;
@@ -44,6 +46,7 @@ class DialogsListViewModel {
     this.colAvaId = 1,
     this.avatarColor,
     this.chatName = '',
+    this.searchExtra = '',
     this.last_msg = '',
     this.last_msg_id = '',
     this.last_msg_fr_id = '',

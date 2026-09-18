@@ -68,15 +68,44 @@ class _SidebarHeaderState extends State<SidebarHeader> {
                 Expanded(
                   child: selectMode
                       ? const SizedBox.shrink()
-                      : Text(
-                          'Чаты',
-                          textAlign: TextAlign.center,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: p.text1,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
+                      : SizedBox(
+                          height: 36,
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            alignment: Alignment.center,
+                            children: [
+                              Text(
+                                'Чаты',
+                                textAlign: TextAlign.center,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: p.text1,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              if (state.connectionStatus ==
+                                  ConnectionStatus.connected)
+                                Positioned(
+                                  top: -2,
+                                  child: Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: BoxDecoration(
+                                      color: p.lime,
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color:
+                                              p.lime.withValues(alpha: 0.45),
+                                          blurRadius: 4,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
                 ),
@@ -203,7 +232,10 @@ class _SearchFieldState extends State<_SearchField> {
         controller: _controller,
         focusNode: _focusNode,
         onTap: _openRibbon,
-        onChanged: context.read<AppState>().setSearch,
+        onChanged: (value) {
+          _openRibbon();
+          context.read<AppState>().setSearch(value);
+        },
         inputFormatters: const [Utf16SanitizingFormatter()],
         style: TextStyle(color: widget.palette.text1, fontSize: 15),
         textAlignVertical: TextAlignVertical.center,

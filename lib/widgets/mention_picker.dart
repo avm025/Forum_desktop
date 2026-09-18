@@ -5,6 +5,9 @@ import '../utils/mention_markup.dart';
 import 'avatar_widget.dart';
 
 /// Выпадающий список участников для `@` (как Telegram Desktop).
+///
+/// Аватары только инициалами (без CachedNetworkImage) — иначе при закрытии
+/// пикера dispose десятков картинок на секунды блокирует курсор в TextField.
 class MentionPicker extends StatelessWidget {
   final List<MentionCandidate> candidates;
   final int selectedIndex;
@@ -33,7 +36,7 @@ class MentionPicker extends StatelessWidget {
       borderRadius: BorderRadius.circular(12),
       clipBehavior: Clip.antiAlias,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 280),
+        constraints: const BoxConstraints(maxHeight: 320),
         child: ListView.builder(
           padding: const EdgeInsets.symmetric(vertical: 6),
           shrinkWrap: true,
@@ -42,12 +45,14 @@ class MentionPicker extends StatelessWidget {
             final c = candidates[i];
             final selected = i == index;
             return MouseRegion(
-              onEnter: (_) => onHighlight(i),
+              onEnter: (_) {
+                if (i != index) onHighlight(i);
+              },
               child: InkWell(
                 onTap: () => onSelect(c),
                 child: ColoredBox(
                   color: selected
-                      ? p.purple.withValues(alpha: 0.14)
+                      ? p.purple.withValues(alpha: 0.22)
                       : Colors.transparent,
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -77,7 +82,7 @@ class MentionPicker extends StatelessWidget {
                         else
                           AvatarWidget(
                             name: c.title,
-                            avatarUrl: c.avatar,
+                            avatarUrl: '',
                             colAvaId: c.colAvaId,
                             online: c.online,
                             size: 36,
@@ -92,7 +97,7 @@ class MentionPicker extends StatelessWidget {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                  color: p.text1,
+                                  color: selected ? p.purple : p.text1,
                                   fontSize: 14,
                                   fontWeight: FontWeight.w600,
                                 ),

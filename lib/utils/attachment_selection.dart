@@ -47,6 +47,11 @@ class AttachmentSelection {
   }
 
   static void clear() {
+    if (activeOwner.value == null && !_retainPointer && !_suppressBubbleTap) {
+      // Уже чисто — не трогаем clearToken, иначе весь чат пересобирается
+      // на каждый клик по композеру и курсор «зависает».
+      return;
+    }
     _retainPointer = false;
     _suppressBubbleTap = false;
     activeOwner.value = null;

@@ -28,6 +28,7 @@ import '../utils/file_saver.dart';
 import '../utils/media_display_name.dart';
 import '../utils/media_message_layout.dart';
 import '../utils/media_file_loader.dart';
+import '../utils/mention_markup.dart';
 import '../utils/media_file_url.dart';
 import 'file_row_tile.dart';
 import 'message_actions_bar.dart';
@@ -86,7 +87,7 @@ class _MessageItemState extends State<MessageItem> {
 
   /// Текст подписи в пузыре. Для file/media не подставляем сырой JSON
   /// обмена с сервером (`{"desc":"","files":[...]}`) — только caption.
-  String get _textValue {
+  String _rawTextValue() {
     if (message.isFile || (message.isImage && message.hasFiles)) {
       final caption = message.desc.trim();
       if (caption.isNotEmpty) return caption;
@@ -97,7 +98,14 @@ class _MessageItemState extends State<MessageItem> {
     return message.body.isNotEmpty ? message.body : message.text;
   }
 
-  bool get _hasText => _textValue.trim().isNotEmpty;
+  String _displayText([AppState? state]) {
+    final raw = _rawTextValue();
+    final s = state ?? (mounted ? context.read<AppState>() : null);
+    if (s == null) return MentionMarkup.toDisplayText(raw);
+    return s.mentionDisplayText(raw);
+  }
+
+  bool get _hasText => _rawTextValue().trim().isNotEmpty;
 
   static bool _isAttachmentPayloadJson(String value) {
     final t = value.trimLeft();
@@ -479,7 +487,7 @@ class _MessageItemState extends State<MessageItem> {
   }
 
   String? get _copyText {
-    final value = _textValue.trim();
+    final value = _displayText().trim();
     if (value.isNotEmpty) return value;
     if (message.files.isNotEmpty) {
       return MediaDisplayName.forFile(
@@ -749,7 +757,7 @@ class _MessageItemState extends State<MessageItem> {
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
       child: _MessageBodyText(
-        text: _textValue,
+        text: _displayText(),
         style: TextStyle(
           color: onAccent ? Colors.white : p.text1,
           fontSize: 15,
@@ -768,7 +776,7 @@ class _MessageItemState extends State<MessageItem> {
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
       child: _MessageBodyText(
-        text: _textValue,
+        text: _displayText(),
         style: TextStyle(
           color: onAccent ? Colors.white : p.text1,
           fontSize: 15,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -9,7 +11,7 @@ import '../theme/app_theme.dart';
 import 'avatar_widget.dart';
 
 /// Шапка открытой переписки.
-class ChatHeader extends StatelessWidget {
+class ChatHeader extends StatefulWidget {
   final DialogsListViewModel dialog;
   final bool showBack;
   final VoidCallback? onSearch;
@@ -21,17 +23,97 @@ class ChatHeader extends StatelessWidget {
     this.onSearch,
   });
 
+  @override
+  State<ChatHeader> createState() => _ChatHeaderState();
+}
+
+class _ChatHeaderState extends State<ChatHeader> {
+  int _memberCount = 0;
+  int _onlineCount = 0;
+  String? _loadedDlgId;
+
+  DialogsListViewModel get dialog => widget.dialog;
+
   bool get _isGroup =>
       dialog.isGrp || dialog.chatType == ChatType.groupChat;
 
-  String get _subtitle {
-    if (dialog.online) return 'в сети';
+  @override
+  void initState() {
+    super.initState();
+    _scheduleMembersSync();
+  }
+
+  @override
+  void didUpdateWidget(ChatHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.dialog.id != widget.dialog.id) {
+      _memberCount = 0;
+      _onlineCount = 0;
+      _loadedDlgId = null;
+      _scheduleMembersSync();
+    }
+  }
+
+  void _scheduleMembersSync() {
+    if (!_isGroup) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_syncMembers());
+    });
+  }
+
+  Future<void> _syncMembers() async {
+    if (!_isGroup || !mounted) return;
+    final id = dialog.id?.trim() ?? '';
+    if (id.isEmpty || DialogsListViewModel.isPlaceholderDlgId(id)) return;
+
+    final state = context.read<AppState>();
+    void applyLocal() {
+      final members = state.groupMembers(id);
+      if (members.isEmpty) return;
+      final total = members.length;
+      final online = members.where((m) => m.online).length;
+      if (_loadedDlgId == id &&
+          _memberCount == total &&
+          _onlineCount == online) {
+        return;
+      }
+      setState(() {
+        _loadedDlgId = id;
+        _memberCount = total;
+        _onlineCount = online;
+      });
+    }
+
+    applyLocal();
+    await state.ensureGroupMembers(id);
+    if (!mounted) return;
+    applyLocal();
+  }
+
+  static String _membersWord(int total) {
+    final n = total % 100;
+    final n1 = total % 10;
+    if (n >= 11 && n <= 14) return 'участников';
+    return switch (n1) {
+      1 => 'участник',
+      2 || 3 || 4 => 'участника',
+      _ => 'участников',
+    };
+  }
+
+  String _subtitleFor(AppState state) {
+    if (state.connectionStatus != ConnectionStatus.connected) {
+      return 'соединение';
+    }
+    if (!_isGroup && dialog.online) return 'в сети';
     if (_isGroup) {
-      final info = dialog.groupAditionalInfo;
-      if (info?.desc != null && info!.desc!.isNotEmpty) return info.desc!;
+      if (_memberCount > 0) {
+        return '$_memberCount ${_membersWord(_memberCount)}, '
+            '$_onlineCount в сети';
+      }
       return 'группа';
     }
-    return 'Был(а) недавно';
+    return 'был(а) недавно';
   }
 
   void _openPeerProfile(BuildContext context) {
@@ -46,10 +128,16 @@ class ChatHeader extends StatelessWidget {
     final p = context.palette;
     final state = context.watch<AppState>();
     final typing = state.chatTypingLabel;
-    final subtitle = (typing != null && typing.isNotEmpty) ? typing : _subtitle;
-    final subtitleColor = typing != null && typing.isNotEmpty
-        ? p.purple
-        : (dialog.online ? p.lime : p.text2);
+    final connecting = state.connectionStatus != ConnectionStatus.connected;
+    final baseSubtitle = _subtitleFor(state);
+    final subtitle = (!connecting && typing != null && typing.isNotEmpty)
+        ? typing
+        : baseSubtitle;
+    final subtitleColor = connecting
+        ? p.text2
+        : (typing != null && typing.isNotEmpty
+            ? p.purple
+            : (!_isGroup && dialog.online ? p.lime : p.text2));
     final canCall = !dialog.fav &&
         (_isGroup || (dialog.usr_id?.trim().isNotEmpty ?? false));
 
@@ -65,7 +153,7 @@ class ChatHeader extends StatelessWidget {
           final compactHeader = constraints.maxWidth < 380;
           return Row(
             children: [
-              if (showBack)
+              if (widget.showBack)
                 IconButton(
                   onPressed: context.read<AppState>().clearSelection,
                   icon: Icon(Icons.arrow_back, color: p.text1),
@@ -150,13 +238,14 @@ class ChatHeader extends StatelessWidget {
                     onPressed: () => context
                         .read<AppState>()
                         .startCallFromChat(video: true),
-                    icon: Icon(Icons.videocam_outlined, color: p.text1, size: 24),
+                    icon:
+                        Icon(Icons.videocam_outlined, color: p.text1, size: 24),
                   ),
                 ],
               ],
               IconButton(
                 tooltip: 'Поиск',
-                onPressed: onSearch,
+                onPressed: widget.onSearch,
                 icon: Icon(Icons.search_rounded, color: p.text1, size: 24),
               ),
               IconButton(

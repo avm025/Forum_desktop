@@ -49,19 +49,38 @@ class GlobalSearch {
     return _imageKinds.contains(kind) || _imageKinds.contains(ext);
   }
 
+  static bool dialogMatchesQuery(DialogsListViewModel d, String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    // «Александр Тимощенко» — все слова должны встретиться (порядок не важен).
+    final tokens = q
+        .split(RegExp(r'\s+'))
+        .where((t) => t.isNotEmpty)
+        .toList(growable: false);
+    if (tokens.isEmpty) return true;
+
+    final info = d.groupAditionalInfo;
+    final haystack = [
+      d.chatName,
+      d.searchExtra,
+      d.last_msg,
+      d.phone ?? '',
+      d.usr_id ?? '',
+      info?.nick ?? '',
+      info?.desc ?? '',
+      info?.words ?? '',
+    ].join('\n').toLowerCase();
+
+    return tokens.every(haystack.contains);
+  }
+
   static List<DialogsListViewModel> filterChats(
     Iterable<DialogsListViewModel> dialogs,
     String query,
   ) {
-    final q = query.trim().toLowerCase();
+    final q = query.trim();
     if (q.isEmpty) return dialogs.toList();
-    return dialogs
-        .where(
-          (d) =>
-              d.chatName.toLowerCase().contains(q) ||
-              d.last_msg.toLowerCase().contains(q),
-        )
-        .toList();
+    return dialogs.where((d) => dialogMatchesQuery(d, q)).toList();
   }
 
   static List<GlobalSearchHit> searchMedia(

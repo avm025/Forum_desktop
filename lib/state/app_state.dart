@@ -1137,6 +1137,7 @@ class AppState extends ChangeNotifier {
       _clearServerDialogSearch(notify: false);
       _groupMembers.clear();
       _groupMembersLoading.clear();
+      _dlgInfoInFlight.clear();
       _isAuthenticated = false;
       _connectionStatus = ConnectionStatus.idle;
       _connectionError = null;
@@ -1412,6 +1413,8 @@ class AppState extends ChangeNotifier {
       _ensureDefaultSelection();
       notifyListeners();
       _startDialogsLiveSync();
+      // Контакты могли подтянуться позже таймаута — дотянуть имена.
+      unawaited(_refreshContactBookNames());
 
       try {
         _groups = await groupsFuture;
@@ -1767,7 +1770,19 @@ class AppState extends ChangeNotifier {
   }
 
   void setSearch(String value) {
+    final prev = _search.trim();
     _search = value;
+    final next = _search.trim();
+    if (prev != next) {
+      // Сразу прячем устаревшие серверные результаты, пока идёт debounce.
+      if (next.isEmpty) {
+        _clearServerDialogSearch(notify: false);
+      } else if (_dlgSearchQuery != next) {
+        _serverSearchDialogs = const [];
+        _dlgSearchQuery = '';
+        _dlgSearchLoading = false;
+      }
+    }
     if (_shouldPreloadGlobalSearch()) {
       _scheduleGlobalSearchPreload();
     } else {
@@ -1790,7 +1805,9 @@ class AppState extends ChangeNotifier {
       _clearServerDialogSearch(notify: false);
       return;
     }
-    if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
+    // HTTP dlg_search не требует живого WS, но без сессии бессмысленно.
+    if (_connectionStatus != ConnectionStatus.connected &&
+        !ApiConfig.hasSession) {
       return;
     }
     _dlgSearchDebounce = Timer(const Duration(milliseconds: 300), () {
@@ -1820,17 +1837,15 @@ class AppState extends ChangeNotifier {
       );
       if (token != _dlgSearchToken || _search.trim() != query) return;
 
-      final localIds = <String>{
-        for (final d in _dialogs)
-          if (!DialogsListViewModel.isPlaceholderDlgId(d.id))
-            (d.id ?? '').trim(),
-      };
-
       final mapped = <DialogsListViewModel>[];
       for (final d in results) {
         final id = (d.id ?? '').trim();
-        if (!DialogsListViewModel.isPlaceholderDlgId(id) &&
-            localIds.any((x) => _sameDlgId(x, id))) {
+        // Уже есть в локальном списке — карточку возьмём из _dialogs при merge.
+        // Не помечаем awaitingJoin для своих чатов.
+        final knownLocal = !DialogsListViewModel.isPlaceholderDlgId(id) &&
+            _dialogs.any((x) => _sameDlgId(x.id, id));
+        if (knownLocal) {
+          mapped.add(d);
           continue;
         }
         if (d.isGrp) {
@@ -1841,12 +1856,18 @@ class AppState extends ChangeNotifier {
         }
         mapped.add(d);
       }
+      _applyContactBookNames(mapped);
       _dlgSearchQuery = query;
       _serverSearchDialogs = mapped;
+      ApiLogger.instance.logEvent(
+        'DLG_SEARCH',
+        'query="$query" → ${mapped.length} шт.',
+      );
     } catch (e) {
       if (token != _dlgSearchToken) return;
       ApiLogger.instance.logEvent('DLG_SEARCH', 'ошибка: $e');
       _serverSearchDialogs = const [];
+      _dlgSearchQuery = query;
     } finally {
       if (token == _dlgSearchToken) {
         _dlgSearchLoading = false;
@@ -2324,6 +2345,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _refreshDialogsBody() async {
+    // Пока открыт поиск — не пересобираем список (скачет выделение).
+    if (_search.trim().isNotEmpty) return;
     try {
       final beforeIds = <String>{
         for (final d in _dialogs)
@@ -2530,29 +2553,24 @@ class AppState extends ChangeNotifier {
   }
 
   List<DialogsListViewModel> get dialogs {
-    var list = _dialogsForActiveTab().toList();
+    // Во время поиска по чатам — все неархивные (как «Все»), иначе совпадения
+    // из других папок пропадают.
+    final searchingChats = _search.trim().isNotEmpty &&
+        (!_globalSearchRibbonVisible ||
+            _globalSearchScope == GlobalSearchScope.chats);
 
-    if (_globalSearchRibbonVisible &&
-        _globalSearchScope == GlobalSearchScope.chats &&
-        _search.trim().isNotEmpty) {
+    var list = searchingChats
+        ? _dialogs.where((d) => !isDialogArchived(d.id)).toList()
+        : _dialogsForActiveTab().toList();
+
+    if (searchingChats) {
       list = GlobalSearch.filterChats(list, _search);
-    } else if (_search.trim().isNotEmpty && !_globalSearchRibbonVisible) {
-      final q = _search.toLowerCase();
-      list = list
-          .where(
-            (d) =>
-                d.chatName.toLowerCase().contains(q) ||
-                d.last_msg.toLowerCase().contains(q),
-          )
-          .toList();
     }
 
     // Серверные результаты `dlg_search` — к локальным без дублей.
-    if (_search.trim().isNotEmpty &&
+    if (searchingChats &&
         _dlgSearchQuery == _search.trim() &&
-        _serverSearchDialogs.isNotEmpty &&
-        (!_globalSearchRibbonVisible ||
-            _globalSearchScope == GlobalSearchScope.chats)) {
+        _serverSearchDialogs.isNotEmpty) {
       final merged = List<DialogsListViewModel>.from(list);
       for (final remote in _serverSearchDialogs) {
         final rid = (remote.id ?? '').trim();
@@ -2569,6 +2587,12 @@ class AppState extends ChangeNotifier {
           continue;
         }
         if (merged.any((d) => _sameDlgId(d.id, rid))) continue;
+        // Уже есть локально, но не прошёл фильтр по имени — поднимаем свою карточку.
+        final localIdx = _dialogs.indexWhere((d) => _sameDlgId(d.id, rid));
+        if (localIdx >= 0) {
+          merged.add(_dialogs[localIdx]);
+          continue;
+        }
         merged.add(remote);
       }
       list = merged;
@@ -2576,6 +2600,9 @@ class AppState extends ChangeNotifier {
 
     // Порядок как у сервера / после _bumpDialog. Пины стабильно сверху,
     // внутри группы относительный порядок не меняем (List.sort нестабилен).
+    // Во время поиска не перекладываем — иначе прыгает выделение.
+    if (searchingChats) return list;
+
     final pinned = <DialogsListViewModel>[];
     final rest = <DialogsListViewModel>[];
     for (final d in list) {
@@ -3142,8 +3169,13 @@ class AppState extends ChangeNotifier {
     final before = _composerDrafts.length;
     _composerDrafts.removeWhere((k, _) => _sameDlgId(k, key));
     if (_composerDrafts.length != before) {
-      // Список чатов должен убрать «Черновик:».
-      notifyListeners();
+      // Два кадра: сначала каретка + закрытие @-пикера, потом сайдбар
+      // «Черновик:». Иначе ChatView.watch блокирует курсор в инпуте.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          notifyListeners();
+        });
+      });
     }
   }
 
@@ -3209,11 +3241,25 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      final draft = await _api.fetchOwnTypingDraft(
-        dlgId: dlgId,
-        currentUserId: usrId,
-      );
-      if (_selectedId != dlgId) return;
+      // Общий dlg_info с @-пикером — без гонки и без второго запроса.
+      final info = await _sharedDlgInfo(dlgId);
+      if (!_sameDlgId(_selectedId, dlgId)) return;
+
+      if (info.users.isNotEmpty) {
+        final dialog = _findDialog(dlgId);
+        if (dialog?.isGrp == true) {
+          _storeGroupMembers(dlgId, info.users);
+        }
+      }
+
+      String? draft;
+      for (final u in info.users) {
+        if (ReactionUtils.sameUserId(u.id, usrId)) {
+          final t = u.typing.trim();
+          if (t.isNotEmpty) draft = t;
+          break;
+        }
+      }
       final text = draft?.trim() ?? '';
       if (text.isEmpty) return;
 
@@ -4093,6 +4139,7 @@ class AppState extends ChangeNotifier {
       }
     }
     _applyLocalDialogPrefs(incoming);
+    _applyContactBookNames(incoming);
 
     // Локальные черновики dlg_id=0 не теряем при refresh dlg_list.
     for (final draft in _dialogs.where((d) => d.isNewContactWithoutDialog)) {
@@ -4203,6 +4250,42 @@ class AppState extends ChangeNotifier {
     if (expired.isNotEmpty) unawaited(_saveDialogLocalPrefs());
   }
 
+  /// Как iOS: имя из телефонной книги перекрывает `usr*_name`.
+  void _applyContactBookNames(List<DialogsListViewModel> list) {
+    final contacts = ContactsService.cached;
+    if (contacts.isEmpty) return;
+    for (final d in list) {
+      if (d.isGrp) continue;
+      final bookName = ContactsService.displayNameForPhone(contacts, d.phone);
+      if (bookName == null) continue;
+      final prev = d.chatName.trim();
+      if (prev.toLowerCase() == bookName.toLowerCase()) continue;
+      if (prev.isNotEmpty) {
+        final parts = <String>[
+          if (d.searchExtra.trim().isNotEmpty) d.searchExtra.trim(),
+          prev,
+        ];
+        d.searchExtra = parts.join(' ');
+      }
+      d.chatName = bookName;
+    }
+  }
+
+  Future<void> _refreshContactBookNames() async {
+    try {
+      await ContactsService.loadContacts()
+          .timeout(const Duration(seconds: 5), onTimeout: () => const []);
+    } catch (_) {
+      return;
+    }
+    if (ContactsService.cached.isEmpty || !_isAuthenticated) return;
+    _applyContactBookNames(_dialogs);
+    if (_serverSearchDialogs.isNotEmpty) {
+      _applyContactBookNames(_serverSearchDialogs);
+    }
+    notifyListeners();
+  }
+
   void _scheduleMuteExpiry() {
     _muteExpiryTimer?.cancel();
     _muteExpiryTimer = null;
@@ -4285,6 +4368,9 @@ class AppState extends ChangeNotifier {
   }
 
   void _bumpDialog(String dlgId) {
+    // Во время поиска не трогаем порядок — иначе фиолетовое выделение
+    // визуально перескакивает с чата на чат.
+    if (_search.trim().isNotEmpty) return;
     final idx = _dialogs.indexWhere((d) => _sameDlgId(d.id, dlgId));
     if (idx < 0) return;
     final dialog = _dialogs.removeAt(idx);
@@ -4745,36 +4831,117 @@ class AppState extends ChangeNotifier {
   /// Участники групп для `@`-упоминаний (`dlg_info`), по dlg_id.
   final Map<String, List<DlgInfoMember>> _groupMembers = {};
   final Set<String> _groupMembersLoading = {};
+  /// Общий in-flight `dlg_info` (черновик typing + участники для @).
+  final Map<String, Future<DlgInfoResult>> _dlgInfoInFlight = {};
 
   List<DlgInfoMember> groupMembers(String? dlgId) {
     final key = dlgId?.trim() ?? '';
     if (key.isEmpty) return const [];
-    return List.unmodifiable(_groupMembers[key] ?? const []);
+    final direct = _groupMembers[key];
+    if (direct != null) return List.unmodifiable(direct);
+    for (final e in _groupMembers.entries) {
+      if (_sameDlgId(e.key, key)) return List.unmodifiable(e.value);
+    }
+    return const [];
   }
 
   bool isGroupMembersLoading(String? dlgId) {
     final key = dlgId?.trim() ?? '';
-    return key.isNotEmpty && _groupMembersLoading.contains(key);
+    if (key.isEmpty) return false;
+    if (_groupMembersLoading.contains(key)) return true;
+    return _groupMembersLoading.any((k) => _sameDlgId(k, key));
   }
 
-  /// Подтянуть участников группы (кэш). Как iOS перед mention-пикером.
+  /// Один `dlg_info` на dlg_id: делит ответ между typing-draft и @-пикером.
+  Future<DlgInfoResult> _sharedDlgInfo(String dlgId, {bool force = false}) {
+    final key = dlgId.trim();
+    if (key.isEmpty || DialogsListViewModel.isPlaceholderDlgId(key)) {
+      return Future.value(const DlgInfoResult());
+    }
+    if (!force) {
+      for (final e in _dlgInfoInFlight.entries) {
+        if (_sameDlgId(e.key, key)) return e.value;
+      }
+    }
+
+    final future = fetchDlgInfo(key).whenComplete(() {
+      _dlgInfoInFlight.removeWhere((k, _) => _sameDlgId(k, key));
+    });
+    _dlgInfoInFlight[key] = future;
+    return future;
+  }
+
+  /// Подтянуть участников группы (кэш). Без notifyListeners — иначе клик по
+  /// композеру / `@` пересобирает весь чат и курсор зависает.
   Future<void> ensureGroupMembers(String dlgId, {bool force = false}) async {
     final key = dlgId.trim();
     if (key.isEmpty || DialogsListViewModel.isPlaceholderDlgId(key)) return;
-    if (!force && _groupMembers.containsKey(key)) return;
-    if (_groupMembersLoading.contains(key)) return;
+    final cached = groupMembers(key);
+    // Пустой кэш после сбоя не считаем валидным — повторяем запрос.
+    if (!force && cached.isNotEmpty) return;
+    if (isGroupMembersLoading(key)) {
+      Future<DlgInfoResult>? inflight;
+      for (final e in _dlgInfoInFlight.entries) {
+        if (_sameDlgId(e.key, key)) {
+          inflight = e.value;
+          break;
+        }
+      }
+      if (inflight != null) {
+        try {
+          final info = await inflight;
+          if (info.users.isNotEmpty) {
+            _storeGroupMembers(key, info.users);
+          }
+        } catch (_) {}
+      }
+      return;
+    }
 
     _groupMembersLoading.add(key);
     try {
-      final info = await fetchDlgInfo(key);
-      _groupMembers[key] = List<DlgInfoMember>.from(info.users);
-      notifyListeners();
+      final info = await _sharedDlgInfo(key, force: force);
+      _storeGroupMembers(key, info.users);
     } catch (e) {
       ApiLogger.instance.logEvent('DLG_INFO', 'members for @$key: $e');
+      // Не кэшируем пустой список — иначе @-пикер навсегда без людей.
+      _groupMembers.removeWhere((k, _) => _sameDlgId(k, key));
     } finally {
-      _groupMembersLoading.remove(key);
-      notifyListeners();
+      _groupMembersLoading.removeWhere((k) => _sameDlgId(k, key));
     }
+  }
+
+  void _storeGroupMembers(String dlgId, List<DlgInfoMember> users) {
+    final key = dlgId.trim();
+    if (key.isEmpty) return;
+    _groupMembers.removeWhere((k, _) => _sameDlgId(k, key));
+    // Дополняем авторами уже загруженных сообщений (если dlg_info урезан).
+    final merged = _mergeMembersWithMessageAuthors(key, users);
+    _groupMembers[key] = merged;
+  }
+
+  List<DlgInfoMember> _mergeMembersWithMessageAuthors(
+    String dlgId,
+    List<DlgInfoMember> users,
+  ) {
+    final out = <DlgInfoMember>[...users];
+    final dialog = _findDialog(dlgId);
+    if (dialog == null || !dialog.isGrp) return out;
+
+    bool hasId(String id) => out.any((u) => ReactionUtils.sameUserId(u.id, id));
+
+    for (final m in dialog.messages) {
+      final uid = (m.fr_id ?? '').trim();
+      if (uid.isEmpty || uid.toLowerCase() == 'ai') continue;
+      if (hasId(uid)) continue;
+      final name = m.fr_name.trim();
+      out.add(DlgInfoMember(
+        id: uid,
+        name: name.isNotEmpty ? name : uid,
+        colAvaId: 1,
+      ));
+    }
+    return out;
   }
 
   List<MentionCandidate> mentionCandidatesFor(
@@ -4782,14 +4949,57 @@ class AppState extends ChangeNotifier {
     required String query,
   }) {
     final me = _profile?.id.trim() ?? '';
-    final members = groupMembers(dlgId)
+    // На лету дополняем кэш авторами сообщений.
+    var members = groupMembers(dlgId);
+    if (members.isNotEmpty) {
+      final merged = _mergeMembersWithMessageAuthors(dlgId, members);
+      if (merged.length > members.length) {
+        _groupMembers[dlgId.trim()] = merged;
+        members = merged;
+      }
+    } else {
+      members = _mergeMembersWithMessageAuthors(dlgId, const []);
+    }
+    final filtered = members
         .where(
           (m) => me.isEmpty || !ReactionUtils.sameUserId(m.id, me),
         )
         .toList();
     return MentionCandidate.filter(
-      members: members,
+      members: filtered,
       query: query,
+    );
+  }
+
+  /// Имя участника для UI-упоминания.
+  String? mentionMemberName(String usrId, {String? dlgId}) {
+    final id = usrId.trim();
+    if (id.isEmpty || id == 'all' || id == 'online') return null;
+    final dialogId = (dlgId ?? _selectedId)?.trim();
+    if (dialogId != null && dialogId.isNotEmpty) {
+      for (final m in groupMembers(dialogId)) {
+        if (!ReactionUtils.sameUserId(m.id, id)) continue;
+        final name = m.name.trim();
+        if (name.isNotEmpty) return name;
+      }
+      final dialog = _findDialog(dialogId);
+      if (dialog != null) {
+        for (final msg in dialog.messages) {
+          final frId = msg.fr_id?.trim() ?? '';
+          if (frId.isEmpty || !ReactionUtils.sameUserId(frId, id)) continue;
+          final name = msg.fr_name.trim();
+          if (name.isNotEmpty) return name;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// MarkdownV2 в body → `@amv` для пузыря / превью.
+  String mentionDisplayText(String text, {String? dlgId}) {
+    return MentionMarkup.toDisplayText(
+      text,
+      nameForUserId: (uid) => mentionMemberName(uid, dlgId: dlgId),
     );
   }
 

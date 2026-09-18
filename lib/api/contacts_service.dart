@@ -21,6 +21,10 @@ class ContactsService {
 
   static List<ApiContact>? _cache;
 
+  /// Уже загруженные контакты (без повторного запроса к ОС).
+  static List<ApiContact> get cached =>
+      List<ApiContact>.unmodifiable(_cache ?? const []);
+
   static Future<List<ApiContact>> loadContacts({bool force = false}) async {
     if (!force && _cache != null) return _cache!;
     if (kIsWeb) return const [];
@@ -51,7 +55,7 @@ class ContactsService {
     for (final c in raw) {
       final name = sanitizeUtf16(c.displayName.trim());
       for (final phone in c.phones) {
-        final normalized = _normalizePhone(phone.number);
+        final normalized = normalizePhone(phone.number);
         if (normalized.isEmpty || seen.contains(normalized)) continue;
         seen.add(normalized);
         result.add(ApiContact(
@@ -65,9 +69,35 @@ class ContactsService {
   }
 
   /// Оставляет только цифры, убирает ведущий «+» и прочие символы.
-  static String _normalizePhone(String input) {
+  static String normalizePhone(String input) {
     var digits = input.replaceAll(RegExp(r'[^\d]'), '');
     // Некоторые номера приходят как 8XXXXXXXXXX — оставляем как есть.
     return digits;
+  }
+
+  /// Имя из телефонной книги по номеру (как iOS `GL.phonesArr`).
+  static String? displayNameForPhone(
+    List<ApiContact> contacts,
+    String? phone,
+  ) {
+    final digits = normalizePhone(phone ?? '');
+    if (digits.length < 7 || contacts.isEmpty) return null;
+
+    String? best;
+    var bestLen = 0;
+    for (final c in contacts) {
+      final cp = c.phone;
+      if (cp.length < 7) continue;
+      final match = cp == digits ||
+          (cp.length >= 10 && digits.endsWith(cp)) ||
+          (digits.length >= 10 && cp.endsWith(digits));
+      if (!match) continue;
+      if (cp.length > bestLen) {
+        bestLen = cp.length;
+        best = c.name.trim();
+      }
+    }
+    if (best == null || best.isEmpty) return null;
+    return best;
   }
 }

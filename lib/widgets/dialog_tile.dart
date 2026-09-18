@@ -31,7 +31,12 @@ class DialogTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final draft = context.watch<AppState>().composerDraftPreview(dialog.id);
+    final state = context.watch<AppState>();
+    final draft = state.composerDraftPreview(dialog.id);
+    final lastMsg = state.mentionDisplayText(
+      dialog.last_msg,
+      dlgId: dialog.id,
+    );
     final emphasized = !selectMode && (selected || dropHover);
     final titleColor = emphasized ? Colors.white : p.text1;
     final subColor = emphasized ? Colors.white70 : p.text2;
@@ -113,6 +118,7 @@ class DialogTile extends StatelessWidget {
                             subColor,
                             draft: draft,
                             draftLabelColor: draftLabelColor,
+                            lastMsg: lastMsg,
                           ),
                         ],
                       ),
@@ -168,6 +174,7 @@ class DialogTile extends StatelessWidget {
     Color color, {
     String? draft,
     required Color draftLabelColor,
+    required String lastMsg,
   }) {
     if (draft != null && draft.isNotEmpty) {
       return Text.rich(
@@ -207,7 +214,7 @@ class DialogTile extends StatelessWidget {
                 color: color, fontSize: 14, fontWeight: FontWeight.w500),
           ),
           Text(
-            dialog.last_msg,
+            lastMsg,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(color: color, fontSize: 14),
@@ -216,7 +223,7 @@ class DialogTile extends StatelessWidget {
       );
     }
     return Text(
-      dialog.last_msg,
+      lastMsg,
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
       style: TextStyle(color: color, fontSize: 14, height: 1.2),

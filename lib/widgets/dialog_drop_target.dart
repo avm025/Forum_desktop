@@ -78,7 +78,7 @@ class _DialogDropTargetState extends State<DialogDropTarget> {
       if (!mounted) return;
       if (DialogDropHover.id.value != dlgId) return;
       final state = context.read<AppState>();
-      if (state.selectedId == dlgId) return;
+      if (AppState.sameDlgId(state.selectedId, dlgId)) return;
       unawaited(state.selectDialog(dlgId));
     });
   }

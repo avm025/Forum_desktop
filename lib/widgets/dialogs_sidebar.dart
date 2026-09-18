@@ -37,11 +37,6 @@ class DialogsSidebar extends StatelessWidget {
         child: Column(
           children: [
             const SidebarHeader(),
-            if (state.connectionStatus == ConnectionStatus.error)
-              _ErrorBanner(
-                message: state.connectionError ?? 'Ошибка подключения',
-                onRetry: () => context.read<AppState>().retryConnection(),
-              ),
             const GlobalSearchScopeRibbon(),
             if (state.globalSearchRibbonVisible) const SizedBox(height: 6),
             const SizedBox(height: 6),
@@ -667,13 +662,19 @@ class _DialogsScrollListState extends State<_DialogsScrollList> {
         final selected =
             !widget.selectMode &&
             widget.hoverId == null &&
-            d.id == widget.selectedId;
+            AppState.sameDlgId(d.id, widget.selectedId);
+        final tileKey = ValueKey(
+          id.isNotEmpty && id != '0'
+              ? 'dlg-$id'
+              : 'usr-${d.usr_id ?? index}',
+        );
         final tile = DialogTile(
+          key: tileKey,
           dialog: d,
           selected: selected,
           dropHover: !widget.selectMode &&
               widget.hoverId != null &&
-              widget.hoverId == id,
+              AppState.sameDlgId(widget.hoverId, id),
           selectMode: widget.selectMode,
           checked: widget.selectMode && app.isDialogChecked(d.id),
           onTap: () => widget.onSelect(d),
@@ -687,46 +688,11 @@ class _DialogsScrollListState extends State<_DialogsScrollList> {
         );
         if (id.isEmpty || widget.selectMode) return tile;
         return DialogDropTarget(
+          key: ValueKey('drop-$id'),
           dlgId: id,
           child: tile,
         );
       },
-    );
-  }
-}
-
-class _ErrorBanner extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-
-  const _ErrorBanner({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.palette;
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.redAccent.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.redAccent.withValues(alpha: 0.4)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            message,
-            style: TextStyle(color: p.text1, fontSize: 13),
-          ),
-          const SizedBox(height: 8),
-          TextButton(
-            onPressed: onRetry,
-            child: const Text('Повторить'),
-          ),
-        ],
-      ),
     );
   }
 }

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/global_search.dart';
 import '../utils/utf16.dart';
 import 'avatar_widget.dart';
 
@@ -28,16 +29,9 @@ class _NewMessagePickerState extends State<NewMessagePicker> {
   String _query = '';
 
   List<DialogsListViewModel> _filtered(List<DialogsListViewModel> all) {
-    final q = _query.trim().toLowerCase();
+    final q = _query.trim();
     if (q.isEmpty) return all;
-    return all
-        .where((d) {
-          final name = d.chatName.toLowerCase();
-          final phone = (d.phone ?? '').toLowerCase();
-          final uid = (d.usr_id ?? '').toLowerCase();
-          return name.contains(q) || phone.contains(q) || uid.contains(q);
-        })
-        .toList();
+    return all.where((d) => GlobalSearch.dialogMatchesQuery(d, q)).toList();
   }
 
   Map<String, List<DialogsListViewModel>> _sections(

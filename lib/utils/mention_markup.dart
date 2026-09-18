@@ -49,9 +49,31 @@ class MentionMarkup {
     return '[@$display](4um://profile?usr_id=$usrId)';
   }
 
+  /// Паттерн MarkdownV2-упоминания в `body`.
+  static final mdMentionPattern = RegExp(
+    r'\[@([^\]]*)\]\(4um://profile\?usr_id=([^)]+)\)',
+    caseSensitive: false,
+  );
+
+  /// UI: `[@amv](4um://profile?usr_id=…)` → `@amv`.
+  ///
+  /// В wire остаётся MarkdownV2; в пузыре / превью — `@ник` (или label).
+  static String toDisplayText(
+    String text, {
+    String? Function(String usrId)? nameForUserId,
+  }) {
+    if (text.isEmpty || !text.contains('4um://profile')) return text;
+    return text.replaceAllMapped(mdMentionPattern, (m) {
+      final label = (m.group(1) ?? '').trim();
+      final id = (m.group(2) ?? '').trim();
+      final nick = label.isNotEmpty ? label : id;
+      return '@$nick';
+    });
+  }
+
   /// Заменить выбранные `@label` на MarkdownV2 перед отправкой.
   ///
-  /// [tokens]: ключ — видимый токен без пробела (`@nick`), значение — `usr_id`.
+  /// [tokens]: ключ — видимый токен (`@nick`), значение — `usr_id`.
   static String applyTokens(String text, Map<String, String> tokens) {
     if (text.isEmpty || tokens.isEmpty) return text;
     final keys = tokens.keys.toList()
@@ -61,7 +83,11 @@ class MentionMarkup {
       final id = tokens[key];
       if (id == null || id.isEmpty) continue;
       final label = key.startsWith('@') ? key.substring(1) : key;
-      final encoded = encodeLink(label: label, usrId: id);
+      final wireLabel = label.split(RegExp(r'\s+')).firstWhere(
+            (s) => s.isNotEmpty,
+            orElse: () => label,
+          );
+      final encoded = encodeLink(label: wireLabel, usrId: id);
       out = out.replaceAllMapped(
         RegExp('${RegExp.escape(key)}(?=\$|[\\s,).!?])'),
         (_) => encoded,
@@ -91,7 +117,7 @@ class MentionCandidate {
     this.special = false,
   });
 
-  /// Текст, который виден в поле ввода после выбора.
+  /// Текст, который виден в поле ввода после выбора (`@amv`).
   String get insertLabel {
     if (special) return title.startsWith('@') ? title.substring(1) : title;
     final nick = subtitle.startsWith('@') ? subtitle.substring(1) : subtitle;
@@ -143,11 +169,13 @@ class MentionCandidate {
     for (final m in members) {
       final name = m.name.trim();
       final nick = m.nick.trim().replaceFirst(RegExp(r'^@'), '');
+      final phone = m.phone.trim();
       if (q.isNotEmpty) {
-        final hay = '$name $nick'.toLowerCase();
+        final hay = '$name $nick $phone ${m.id}'.toLowerCase();
         if (!hay.contains(q) &&
             !name.toLowerCase().startsWith(q) &&
-            !nick.toLowerCase().startsWith(q)) {
+            !nick.toLowerCase().startsWith(q) &&
+            !phone.contains(q)) {
           continue;
         }
       }
@@ -155,7 +183,7 @@ class MentionCandidate {
         usrId: m.id,
         title: name.isNotEmpty ? name : (nick.isNotEmpty ? nick : m.id),
         subtitle: nick.isNotEmpty ? '@$nick' : '',
-        avatar: m.avatarUrl,
+        avatar: '', // без сети — иначе dispose картинок вешает курсор
         colAvaId: m.colAvaId,
         online: m.online,
       ));

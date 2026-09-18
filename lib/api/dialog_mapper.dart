@@ -30,7 +30,9 @@ class DialogMapper {
     // Как iOS DataConverter: для 1:1 берём поля собеседника, не usr1_*.
     var avatarPath =
         (json['img_url'] ?? json['ava'] ?? '').toString().trim();
-    var chatName = json['name']?.toString() ?? '';
+    final topLevelName = (json['name']?.toString() ?? '').trim();
+    var chatName = topLevelName;
+    var searchExtra = '';
     var usrId = json['usr_id']?.toString();
     var phone = json['phone']?.toString();
     var colorHex = (json['color'] ?? '').toString().trim();
@@ -48,8 +50,12 @@ class DialogMapper {
         usr2Id.isNotEmpty) {
       final meIsUsr1 = _sameUserId(currentUserId, usr1Id);
       if (meIsUsr1) {
-        if (chatName.trim().isEmpty) {
-          chatName = json['usr2_name']?.toString() ?? '';
+        // Как iOS: всегда peer name, не top-level `name` (часто ник).
+        final peerName = (json['usr2_name']?.toString() ?? '').trim();
+        chatName = peerName.isNotEmpty ? peerName : topLevelName;
+        if (topLevelName.isNotEmpty &&
+            topLevelName.toLowerCase() != chatName.toLowerCase()) {
+          searchExtra = topLevelName;
         }
         phone = json['usr2_phone']?.toString() ?? phone;
         usrId = usr2Id;
@@ -59,8 +65,11 @@ class DialogMapper {
         final peerColor = (json['usr2_color'] ?? '').toString().trim();
         if (peerColor.isNotEmpty) colorHex = peerColor;
       } else {
-        if (chatName.trim().isEmpty) {
-          chatName = json['usr1_name']?.toString() ?? '';
+        final peerName = (json['usr1_name']?.toString() ?? '').trim();
+        chatName = peerName.isNotEmpty ? peerName : topLevelName;
+        if (topLevelName.isNotEmpty &&
+            topLevelName.toLowerCase() != chatName.toLowerCase()) {
+          searchExtra = topLevelName;
         }
         phone = json['usr1_phone']?.toString() ?? phone;
         usrId = usr1Id;
@@ -82,6 +91,15 @@ class DialogMapper {
       if ((usrId == null || usrId.isEmpty) && usr1Id.isNotEmpty) {
         usrId = _sameUserId(currentUserId, usr1Id) ? usr2Id : usr1Id;
         if (usrId.isEmpty) usrId = usr1Id;
+      }
+      final peerFallback = (json['usr1_name'] ?? json['usr2_name'] ?? '')
+          .toString()
+          .trim();
+      if (chatName.isEmpty && peerFallback.isNotEmpty) {
+        chatName = peerFallback;
+      } else if (peerFallback.isNotEmpty &&
+          peerFallback.toLowerCase() != chatName.toLowerCase()) {
+        searchExtra = peerFallback;
       }
     }
 
@@ -105,6 +123,7 @@ class DialogMapper {
           ? ['#${colorHex.replaceFirst('#', '')}']
           : null,
       chatName: sanitizeUtf16(chatName),
+      searchExtra: sanitizeUtf16(searchExtra),
       last_msg: sanitizeUtf16(last.text),
       last_msg_id: last.id,
       last_msg_fr_id: last.frId.isNotEmpty

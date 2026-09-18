@@ -33,7 +33,12 @@ class MessageInput extends StatefulWidget {
 class _MessageInputState extends State<MessageInput> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
-  bool _hasText = false;
+  /// Отдельно от setState — смена иконки send/mic не трогает TextField.
+  final ValueNotifier<bool> _hasText = ValueNotifier(false);
+  /// Пикер `@` вне setState композера — закрытие не пересобирает TextField.
+  final ValueNotifier<_MentionStrip?> _mentionStrip =
+      ValueNotifier<_MentionStrip?>(null);
+
   MessageViewModel? _lastReplyTarget;
   MessageViewModel? _lastEditTarget;
   String? _boundDlgId;
@@ -43,9 +48,9 @@ class _MessageInputState extends State<MessageInput> {
 
   /// Выбранные `@label` → usr_id для MarkdownV2 при отправке.
   final Map<String, String> _mentionTokens = {};
-  MentionQuery? _mentionQuery;
-  List<MentionCandidate> _mentionCandidates = const [];
-  int _mentionIndex = 0;
+  String? _lastReportedText;
+  bool _mentionSyncScheduled = false;
+  bool _membersFetchQueued = false;
 
   @override
   void initState() {
@@ -86,25 +91,27 @@ class _MessageInputState extends State<MessageInput> {
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
+    _hasText.dispose();
+    _mentionStrip.dispose();
     super.dispose();
   }
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
-    if (_mentionQuery != null && _mentionCandidates.isNotEmpty) {
+    final strip = _mentionStrip.value;
+    if (strip != null && strip.candidates.isNotEmpty) {
       if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
-        setState(() {
-          _mentionIndex = (_mentionIndex + 1) % _mentionCandidates.length;
-        });
+        _mentionStrip.value = strip.copyWith(
+          index: (strip.index + 1) % strip.candidates.length,
+        );
         return KeyEventResult.handled;
       }
       if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
-        setState(() {
-          _mentionIndex =
-              (_mentionIndex - 1 + _mentionCandidates.length) %
-                  _mentionCandidates.length;
-        });
+        _mentionStrip.value = strip.copyWith(
+          index: (strip.index - 1 + strip.candidates.length) %
+              strip.candidates.length,
+        );
         return KeyEventResult.handled;
       }
       if (event.logicalKey == LogicalKeyboardKey.escape) {
@@ -114,8 +121,8 @@ class _MessageInputState extends State<MessageInput> {
       if (event.logicalKey == LogicalKeyboardKey.enter ||
           event.logicalKey == LogicalKeyboardKey.numpadEnter ||
           event.logicalKey == LogicalKeyboardKey.tab) {
-        _insertMention(_mentionCandidates[
-            _mentionIndex.clamp(0, _mentionCandidates.length - 1)]);
+        _insertMention(strip.candidates[
+            strip.index.clamp(0, strip.candidates.length - 1)]);
         return KeyEventResult.handled;
       }
     }
@@ -177,8 +184,9 @@ class _MessageInputState extends State<MessageInput> {
       composing: TextRange.empty,
     );
     _syncingText = false;
+    _lastReportedText = next;
     final has = next.trim().isNotEmpty;
-    if (has != _hasText) setState(() => _hasText = has);
+    if (has != _hasText.value) _hasText.value = has;
     context.read<AppState>().reportComposerText(next);
     // Каретка должна мигать в поле после перевода строки.
     if (!_focusNode.hasFocus) {
@@ -264,66 +272,112 @@ class _MessageInputState extends State<MessageInput> {
         selection: TextSelection.collapsed(offset: start + safe.length),
       );
       _syncingText = false;
-      setState(() => _hasText = newText.trim().isNotEmpty);
+      _lastReportedText = newText;
+      _hasText.value = newText.trim().isNotEmpty;
       context.read<AppState>().reportComposerText(newText);
     } catch (_) {}
   }
 
   void _onTextChanged() {
     if (_syncingText) return;
-    final has = _controller.text.trim().isNotEmpty;
-    if (has != _hasText) setState(() => _hasText = has);
-    context.read<AppState>().reportComposerText(_controller.text);
-    _syncMentionPicker();
+    final text = _controller.text;
+    final textChanged = text != _lastReportedText;
+    if (textChanged) {
+      _lastReportedText = text;
+      final has = text.trim().isNotEmpty;
+      if (has != _hasText.value) _hasText.value = has;
+      context.read<AppState>().reportComposerText(text);
+    }
+    // Пикер через ValueNotifier — без setState на TextField.
+    _scheduleMentionPickerSync();
   }
 
   void _closeMentionPicker() {
-    if (_mentionQuery == null && _mentionCandidates.isEmpty) return;
-    setState(() {
-      _mentionQuery = null;
-      _mentionCandidates = const [];
-      _mentionIndex = 0;
+    if (_mentionStrip.value == null) return;
+    _mentionStrip.value = null;
+  }
+
+  void _scheduleMentionPickerSync() {
+    if (_mentionSyncScheduled) return;
+    _mentionSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _mentionSyncScheduled = false;
+      if (!mounted) return;
+      _syncMentionPicker();
     });
+  }
+
+  bool _sameCandidates(
+    List<MentionCandidate> a,
+    List<MentionCandidate> b,
+  ) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].usrId != b[i].usrId || a[i].title != b[i].title) {
+        return false;
+      }
+    }
+    return true;
   }
 
   void _syncMentionPicker() {
     final state = context.read<AppState>();
     final dialog = state.selectedDialog;
+    final current = _mentionStrip.value;
     if (dialog == null || !dialog.isGrp || dialog.awaitingJoin) {
-      if (_mentionQuery != null) _closeMentionPicker();
+      _closeMentionPicker();
       return;
     }
 
     final sel = _controller.selection;
     if (!sel.isValid || !sel.isCollapsed) {
-      if (_mentionQuery != null) _closeMentionPicker();
+      _closeMentionPicker();
       return;
     }
 
     final query = MentionQuery.atCaret(_controller.text, sel.baseOffset);
     if (query == null) {
-      if (_mentionQuery != null) _closeMentionPicker();
+      _closeMentionPicker();
       return;
     }
 
     final dlgId = dialog.id?.trim() ?? '';
     if (dlgId.isEmpty) return;
-    if (state.groupMembers(dlgId).isEmpty) {
-      unawaited(state.ensureGroupMembers(dlgId));
+
+    // Один запрос dlg_info на сессию ввода `@`, без лавины unawaited.
+    if (state.groupMembers(dlgId).isEmpty &&
+        !state.isGroupMembersLoading(dlgId) &&
+        !_membersFetchQueued) {
+      _membersFetchQueued = true;
+      unawaited(state.ensureGroupMembers(dlgId).whenComplete(() {
+        _membersFetchQueued = false;
+        if (!mounted) return;
+        _scheduleMentionPickerSync();
+      }));
     }
 
     final candidates = state.mentionCandidatesFor(dlgId, query: query.query);
-    setState(() {
-      _mentionQuery = query;
-      _mentionCandidates = candidates;
-      if (_mentionIndex >= candidates.length) {
-        _mentionIndex = 0;
-      }
-    });
+    final sameQuery = current?.query.atIndex == query.atIndex &&
+        current?.query.query == query.query;
+    if (sameQuery &&
+        current != null &&
+        _sameCandidates(current.candidates, candidates) &&
+        (current.index < candidates.length || candidates.isEmpty)) {
+      return;
+    }
+
+    var index = current?.index ?? 0;
+    if (index >= candidates.length) index = 0;
+    _mentionStrip.value = _MentionStrip(
+      query: query,
+      candidates: candidates,
+      index: index,
+    );
   }
 
   void _insertMention(MentionCandidate candidate) {
-    final q = _mentionQuery;
+    final q = _mentionStrip.value?.query;
     if (q == null) return;
     final text = _controller.text;
     final caret = _controller.selection.isValid
@@ -343,12 +397,9 @@ class _MessageInputState extends State<MessageInput> {
       selection: TextSelection.collapsed(offset: newCaret),
     );
     _syncingText = false;
-    setState(() {
-      _hasText = next.trim().isNotEmpty;
-      _mentionQuery = null;
-      _mentionCandidates = const [];
-      _mentionIndex = 0;
-    });
+    _lastReportedText = next;
+    _hasText.value = next.trim().isNotEmpty;
+    _closeMentionPicker();
     context.read<AppState>().reportComposerText(next);
     _focusNode.requestFocus();
   }
@@ -359,9 +410,13 @@ class _MessageInputState extends State<MessageInput> {
     return MentionMarkup.applyTokens(trimmed, _mentionTokens);
   }
 
-  void _scheduleDialogBinding(AppState state) {
-    final dlgId = state.selectedDialog?.id;
-    final epoch = state.composerDraftEpoch;
+  void _scheduleDialogBinding(
+    AppState state, {
+    required String? selectedId,
+    required int draftEpoch,
+  }) {
+    final dlgId = selectedId ?? state.selectedDialog?.id;
+    final epoch = draftEpoch;
     if (dlgId == _boundDlgId && epoch == _appliedDraftEpoch) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -372,10 +427,12 @@ class _MessageInputState extends State<MessageInput> {
         _boundDlgId = id;
         _appliedDraftEpoch = -1;
         _mentionTokens.clear();
+        _membersFetchQueued = false;
+        _lastReportedText = '';
         _syncingText = true;
         _controller.clear();
         _syncingText = false;
-        if (_hasText) setState(() => _hasText = false);
+        if (_hasText.value) _hasText.value = false;
         _closeMentionPicker();
       }
       _tryApplyDraft(s, id);
@@ -400,7 +457,8 @@ class _MessageInputState extends State<MessageInput> {
       selection: TextSelection.collapsed(offset: draft.length),
     );
     _syncingText = false;
-    setState(() => _hasText = draft.trim().isNotEmpty);
+    _lastReportedText = draft;
+    _hasText.value = draft.trim().isNotEmpty;
     state.reportComposerText(draft);
   }
 
@@ -415,9 +473,10 @@ class _MessageInputState extends State<MessageInput> {
       _syncingText = true;
       _controller.clear();
       _syncingText = false;
+      _lastReportedText = '';
       _mentionTokens.clear();
       _closeMentionPicker();
-      if (_hasText) setState(() => _hasText = false);
+      if (_hasText.value) _hasText.value = false;
       state.reportComposerText('');
       await state.submitEditedMessage(text);
       return;
@@ -429,9 +488,10 @@ class _MessageInputState extends State<MessageInput> {
     _syncingText = true;
     _controller.clear();
     _syncingText = false;
+    _lastReportedText = '';
     _mentionTokens.clear();
     _closeMentionPicker();
-    if (_hasText) setState(() => _hasText = false);
+    if (_hasText.value) _hasText.value = false;
     state.reportComposerText('');
 
     if (hasPending) {
@@ -581,20 +641,27 @@ class _MessageInputState extends State<MessageInput> {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
+    // select вместо watch: очистка черновика / typing не пересобирает TextField
+    // (иначе после удаления `@` курсор на секунды не ставится ЛКМ).
+    final replyTo = context.select((AppState s) => s.replyToMessage);
+    final editing = context.select((AppState s) => s.editingMessage);
+    final hasPending =
+        context.select((AppState s) => s.hasComposerPendingAttachments);
+    final draftEpoch = context.select((AppState s) => s.composerDraftEpoch);
+    final selectedId = context.select((AppState s) => s.selectedId);
     final p = context.palette;
-    final replyTo = state.replyToMessage;
-    final editing = state.editingMessage;
+    final state = context.read<AppState>();
 
-    _scheduleDialogBinding(state);
+    _scheduleDialogBinding(state, selectedId: selectedId, draftEpoch: draftEpoch);
 
     if (editing != null && !identical(editing, _lastEditTarget)) {
       _lastEditTarget = editing;
-      final seed = editing.body.trim().isNotEmpty
+      final seedRaw = editing.body.trim().isNotEmpty
           ? editing.body.trim()
           : (editing.desc.trim().isNotEmpty
               ? editing.desc.trim()
               : editing.text.trim());
+      final seed = state.mentionDisplayText(seedRaw);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _syncingText = true;
@@ -603,7 +670,8 @@ class _MessageInputState extends State<MessageInput> {
           selection: TextSelection.collapsed(offset: seed.length),
         );
         _syncingText = false;
-        setState(() => _hasText = seed.trim().isNotEmpty);
+        _lastReportedText = seed;
+        _hasText.value = seed.trim().isNotEmpty;
         _focusNode.requestFocus();
       });
     } else if (editing == null) {
@@ -620,8 +688,6 @@ class _MessageInputState extends State<MessageInput> {
     }
 
     final banner = editing ?? replyTo;
-    final hasPending = state.hasComposerPendingAttachments;
-    final showSend = _hasText || hasPending || editing != null;
 
     return Listener(
       behavior: HitTestBehavior.translucent,
@@ -647,16 +713,29 @@ class _MessageInputState extends State<MessageInput> {
                 },
               ),
             _pendingStrip(state, p),
-            if (_mentionQuery != null && _mentionCandidates.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: MentionPicker(
-                  candidates: _mentionCandidates,
-                  selectedIndex: _mentionIndex,
-                  onHighlight: (i) => setState(() => _mentionIndex = i),
-                  onSelect: _insertMention,
-                ),
-              ),
+            // Пикер — сосед TextField (не Stack/Positioned): иначе клики и hover
+            // не попадают в список, и «выбранный» ряд не обновляется.
+            ValueListenableBuilder<_MentionStrip?>(
+              valueListenable: _mentionStrip,
+              builder: (context, strip, _) {
+                if (strip == null || strip.candidates.isEmpty) {
+                  return const SizedBox.shrink();
+                }
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: MentionPicker(
+                    candidates: strip.candidates,
+                    selectedIndex: strip.index,
+                    onHighlight: (i) {
+                      final cur = _mentionStrip.value;
+                      if (cur == null || i == cur.index) return;
+                      _mentionStrip.value = cur.copyWith(index: i);
+                    },
+                    onSelect: _insertMention,
+                  ),
+                );
+              },
+            ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
@@ -696,29 +775,39 @@ class _MessageInputState extends State<MessageInput> {
                           isCollapsed: true,
                           hintText: editing != null
                               ? 'Изменить...'
-                              : (replyTo == null ? 'Сообщение...' : 'Ответ...'),
-                          hintStyle: TextStyle(color: p.text2, fontSize: 15),
+                              : (replyTo == null
+                                  ? 'Сообщение...'
+                                  : 'Ответ...'),
+                          hintStyle:
+                              TextStyle(color: p.text2, fontSize: 15),
                           border: InputBorder.none,
                         ),
                       ),
                     ),
                   ),
                   const SizedBox(width: 12),
-                  GestureDetector(
-                    onTap: _send,
-                    child: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: p.purple,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        showSend ? Icons.send_rounded : Icons.mic,
-                        color: Colors.white,
-                        size: 20,
-                      ),
-                    ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _hasText,
+                    builder: (context, hasText, _) {
+                      final showSend =
+                          hasText || hasPending || editing != null;
+                      return GestureDetector(
+                        onTap: _send,
+                        child: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: p.purple,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            showSend ? Icons.send_rounded : Icons.mic,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -726,6 +815,31 @@ class _MessageInputState extends State<MessageInput> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Состояние полосы `@`-упоминаний вне setState композера.
+class _MentionStrip {
+  final MentionQuery query;
+  final List<MentionCandidate> candidates;
+  final int index;
+
+  const _MentionStrip({
+    required this.query,
+    required this.candidates,
+    required this.index,
+  });
+
+  _MentionStrip copyWith({
+    MentionQuery? query,
+    List<MentionCandidate>? candidates,
+    int? index,
+  }) {
+    return _MentionStrip(
+      query: query ?? this.query,
+      candidates: candidates ?? this.candidates,
+      index: index ?? this.index,
     );
   }
 }

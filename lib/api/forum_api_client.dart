@@ -686,7 +686,7 @@ class ForumApiClient {
     return _extractOwnTypingDraft(resp, usrId);
   }
 
-  /// WS `dlg_info` — участники и метаданные (как iOS AnotherProfile).
+  /// WS `dlg_info` — участники и метаданные (как iOS AnotherProfile / Dialog).
   Future<DlgInfoResult> fetchDlgInfo({
     required String dlgId,
     String? currentUserId,
@@ -694,11 +694,14 @@ class ForumApiClient {
     final id = dlgId.trim();
     if (id.isEmpty || id == '0') return const DlgInfoResult();
 
-    final data = <String, dynamic>{'dlg_id': id};
-    // iOS также шлёт grp_id для групп.
-    data['grp_id'] = id;
+    // iOS Dialog.getGroupInfo: usr_id + token + grp_id (без dlg_id).
+    final data = <String, dynamic>{
+      'grp_id': id,
+      'dlg_id': id,
+    };
     final usrId = currentUserId?.trim() ?? '';
     if (usrId.isNotEmpty) data['usr_id'] = usrId;
+    if (ApiConfig.token.isNotEmpty) data['token'] = ApiConfig.token;
 
     final resp = await sendWs({'type': 'dlg_info', 'data': data});
     return DlgInfoResult.fromResponse(resp);
@@ -863,10 +866,10 @@ class ForumApiClient {
     final query = text.trim();
     if (query.isEmpty) return const [];
 
+    // Как в доке / iOS NW.httpRequest: только type + data.text (Bearer в заголовке).
     final payload = {
       'type': 'dlg_search',
       'data': {'text': query},
-      if (ApiConfig.token.isNotEmpty) 'token': ApiConfig.token,
     };
     final body = jsonEncode(payload);
     final sw = Stopwatch()..start();
@@ -890,7 +893,11 @@ class ForumApiClient {
       throw ForumApiException('HTTP ${response.statusCode}: ${response.body}');
     }
 
-    final map = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw ForumApiException('dlg_search: неожиданный ответ');
+    }
+    final map = Map<String, dynamic>.from(decoded);
     if (map['success'] != true) {
       throw ForumApiException(
         map['message']?.toString() ?? 'Ошибка поиска',
@@ -1178,6 +1185,9 @@ class ForumApiClient {
   }
 
   /// Отправить сообщение по WebSocket и дождаться ответа с тем же type.
+  ///
+  /// Одновременные запросы с одинаковым `type` ставятся в очередь
+  /// (сервер отвечает без request-id — параллельно нельзя).
   Future<Map<String, dynamic>> sendWs(
     Map<String, dynamic> message, {
     Duration timeout = const Duration(seconds: 60),
@@ -1192,8 +1202,12 @@ class ForumApiClient {
       throw ArgumentError('Поле type обязательно');
     }
 
-    if (_pending.containsKey(type)) {
-      throw StateError('Уже ожидается ответ на $type');
+    // Ждём предыдущий запрос того же type, затем шлём свой.
+    while (_pending.containsKey(type)) {
+      final wait = _pending[type]!.future;
+      try {
+        await wait;
+      } catch (_) {}
     }
 
     final completer = Completer<Map<String, dynamic>>();
@@ -1438,19 +1452,44 @@ class ForumApiClient {
     Map<String, dynamic> resp, {
     String? currentUserId,
   }) {
-    final data = resp['data'];
-    if (data is! Map) return const [];
+    final raw = _extractDialogsList(resp['data']) ??
+        _extractDialogsList(resp['dialogs']);
+    if (raw == null) return const [];
 
-    final raw = data['dialogs'];
-    if (raw is! List) return const [];
+    final out = <DialogsListViewModel>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      try {
+        out.add(
+          DialogMapper.fromServerJson(
+            Map<String, dynamic>.from(item),
+            currentUserId: currentUserId,
+          ),
+        );
+      } catch (e) {
+        ApiLogger.instance.logEvent('DLG_PARSE', 'пропуск карточки: $e');
+      }
+    }
+    return out;
+  }
 
-    return raw
-        .whereType<Map>()
-        .map((e) => DialogMapper.fromServerJson(
-              Map<String, dynamic>.from(e),
-              currentUserId: currentUserId,
-            ))
-        .toList();
+  static List<dynamic>? _extractDialogsList(dynamic data) {
+    if (data is List) return data;
+    if (data is Map) {
+      final dialogs = data['dialogs'];
+      if (dialogs is List) return dialogs;
+      // Иногда data — одна карточка.
+      if (data.containsKey('dlg_id') || data.containsKey('id')) {
+        return [data];
+      }
+    }
+    if (data is String && data.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(data);
+        return _extractDialogsList(decoded);
+      } catch (_) {}
+    }
+    return null;
   }
 
   List<DialogGroup> _parseGroups(Map<String, dynamic> resp) {

@@ -310,6 +310,9 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
 
   String _subtitle(DialogsListViewModel dialog) {
     if (dialog.fav) return 'избранное';
+    final connected =
+        context.read<AppState>().connectionStatus == ConnectionStatus.connected;
+    if (!connected) return 'соединение';
     if (!dialog.isGrp && dialog.chatType != ChatType.groupChat) {
       return dialog.online ? 'в сети' : 'был(а) недавно';
     }
@@ -321,7 +324,7 @@ class _PeerProfileScreenState extends State<PeerProfileScreen> {
       _ => 'участников',
     };
     if (total == 0) return 'группа';
-    return '$total $word, $online онлайн';
+    return '$total $word, $online в сети';
   }
 
   Future<void> _copyNick() async {

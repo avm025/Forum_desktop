@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../models/message_view_model.dart';
+import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import 'media_thumb_tile.dart';
 
@@ -37,8 +39,11 @@ class ReplyPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final preview =
-        _isRepost ? '' : message.replyPreviewTextFor(currentUserId);
+    final preview = _isRepost
+        ? ''
+        : context.read<AppState>().mentionDisplayText(
+              message.replyPreviewTextFor(currentUserId),
+            );
     final name = message.prn_fr_name.trim().isNotEmpty
         ? message.prn_fr_name.trim()
         : 'Сообщение';

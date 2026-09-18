@@ -28,17 +28,22 @@ class MessageComposerReply extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    final me = context.watch<AppState>().profile?.id;
-    final preview = message.quotedPreviewTextFor(me);
+    final state = context.watch<AppState>();
+    final me = state.profile?.id;
+    final preview = state.mentionDisplayText(
+      message.quotedPreviewTextFor(me),
+    );
     final name = isEdit
         ? 'Редактирование'
         : (message.quotedAuthorName.isNotEmpty
             ? message.quotedAuthorName
             : 'Сообщение');
     final bodyPreview = isEdit
-        ? (message.body.trim().isNotEmpty
-            ? message.body.trim()
-            : message.text.trim())
+        ? state.mentionDisplayText(
+            message.body.trim().isNotEmpty
+                ? message.body.trim()
+                : message.text.trim(),
+          )
         : preview;
 
     return Container(

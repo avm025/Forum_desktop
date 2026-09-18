@@ -12,6 +12,8 @@ class DlgInfoMember {
   final bool isOwner;
   final String lastSeen;
   final String? roleName;
+  /// Черновик `users[].typing` текущего пользователя.
+  final String typing;
 
   const DlgInfoMember({
     required this.id,
@@ -24,6 +26,7 @@ class DlgInfoMember {
     this.isOwner = false,
     this.lastSeen = '',
     this.roleName,
+    this.typing = '',
   });
 
   String get avatarUrl => ApiConfig.resolveAssetUrl(avatar);
@@ -32,7 +35,9 @@ class DlgInfoMember {
     final col = json['col_ava_id'] ?? json['usr_col_ava_id'];
     final colId = col is int ? col : int.tryParse('$col') ?? 1;
     return DlgInfoMember(
-      id: json['usr_id']?.toString().trim() ?? '',
+      id: json['usr_id']?.toString().trim() ??
+          json['id']?.toString().trim() ??
+          '',
       name: json['name']?.toString() ??
           json['usr_name']?.toString() ??
           '',
@@ -46,6 +51,7 @@ class DlgInfoMember {
       isOwner: json['is_owner'] == 1 || json['is_owner'] == true,
       lastSeen: json['last_seen']?.toString() ?? '',
       roleName: json['dlg_role_name']?.toString(),
+      typing: json['typing']?.toString() ?? '',
     );
   }
 }
@@ -71,7 +77,16 @@ class DlgInfoResult {
       for (final item in usersRaw) {
         if (item is! Map) continue;
         final m = DlgInfoMember.fromJson(Map<String, dynamic>.from(item));
-        if (m.id.isNotEmpty) users.add(m);
+        if (m.id.isEmpty) continue;
+        final dup = users.any((u) {
+          final a = u.id.trim();
+          final b = m.id.trim();
+          if (a == b) return true;
+          final na = int.tryParse(a);
+          final nb = int.tryParse(b);
+          return na != null && nb != null && na == nb;
+        });
+        if (!dup) users.add(m);
       }
     }
 
