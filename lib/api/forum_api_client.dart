@@ -21,6 +21,7 @@ import 'device_id_service.dart';
 import 'dialog_mapper.dart';
 import 'file_uploader.dart';
 import 'forum_network.dart';
+import 'gl.dart';
 import 'message_mapper.dart';
 import 'msg_list_request.dart';
 import 'msg_list_result.dart';
@@ -142,6 +143,7 @@ class ForumApiClient {
     final profileMap =
         Map<String, dynamic>.from(loginResp['profile'] as Map? ?? {});
     await ForumCache.instance.saveProfile(profileMap);
+    await GL.applyLogInUpdated(loginResp['updated']);
 
     await sendDeviceData(uid, fcmToken: fcmToken, notifications: notifications);
 
@@ -1096,42 +1098,21 @@ class ForumApiClient {
 
   /// HTTP `type: database` — справочники оформления (WS_DATABASE.md).
   Future<Map<String, dynamic>> fetchDatabase() async {
-    final sw = Stopwatch()..start();
-    const payload = {'type': 'database'};
-    final body = jsonEncode(payload);
-    ApiLogger.instance.logHttpSend('POST', ApiConfig.httpApiUrl, body);
+    return postCatalogHttp(const {'type': 'database'});
+  }
 
-    final response = await _http
-        .post(
-          ApiConfig.httpApiUri,
-          headers: ApiConfig.hasSession
-              ? ApiConfig.authHeaders
-              : ApiConfig.openHttpHeaders,
-          body: body,
-        )
-        .timeout(const Duration(seconds: 30));
-
-    sw.stop();
-    ApiLogger.instance.logHttpReceive(
-      response.statusCode,
-      response.body,
-      duration: sw.elapsed,
-    );
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ForumApiException('HTTP ${response.statusCode}: ${response.body}');
-    }
-
-    final map = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
-    if (map['success'] != true) {
-      throw ForumApiException(
-        map['message']?.toString() ?? 'Ошибка загрузки справочников',
-        payload: map,
-      );
-    }
-
-    await ForumCache.instance.saveDatabase(map);
-    return map;
+  /// HTTP `type: ai_list` — справочник ИИ-моделей.
+  Future<Map<String, dynamic>> fetchAiList({
+    int? prnId,
+    int? aiId,
+  }) async {
+    final data = <String, dynamic>{};
+    if (prnId != null) data['prn_id'] = prnId;
+    if (aiId != null) data['ai_id'] = aiId;
+    return postCatalogHttp({
+      'type': 'ai_list',
+      if (data.isNotEmpty) 'data': data,
+    });
   }
 
   /// WS `change_profile` — сохранение оформления в профиле.
@@ -1144,8 +1125,37 @@ class ForumApiClient {
 
   /// HTTP `type: emoji` — справочник emoji для пикера.
   Future<List<EmojiCategory>> fetchEmojiList() async {
+    final map = await postCatalogHttp(const {'type': 'emoji'});
+    final data = map['data'];
+    if (data is! List) return const [];
+
+    return data
+        .whereType<Map>()
+        .map((e) => EmojiCategory.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  /// HTTP POST с кэшем `ai_list` / `database` / `emoji` по `GL.LOG_IN_UPDATED`.
+  Future<Map<String, dynamic>> postCatalogHttp(
+    Map<String, dynamic> payload,
+  ) async {
+    final type = payload['type']?.toString() ?? '';
+    if (GL.catalogTypes.contains(type)) {
+      final cached = await ForumCache.instance.loadCatalogIfFresh(
+        type,
+        request: payload,
+        serverUpdatedAt: GL.updatedAt(type),
+      );
+      if (cached != null) {
+        ApiLogger.instance.logEvent(
+          'CACHE',
+          'HTTP $type ← catalog (skip network)',
+        );
+        return cached;
+      }
+    }
+
     final sw = Stopwatch()..start();
-    const payload = {'type': 'emoji'};
     final body = jsonEncode(payload);
     ApiLogger.instance.logHttpSend('POST', ApiConfig.httpApiUrl, body);
 
@@ -1173,18 +1183,15 @@ class ForumApiClient {
     final map = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
     if (map['success'] != true) {
       throw ForumApiException(
-        map['message']?.toString() ?? 'Ошибка загрузки emoji',
+        map['message']?.toString() ?? 'Ошибка загрузки $type',
         payload: map,
       );
     }
 
-    final data = map['data'];
-    if (data is! List) return const [];
-
-    return data
-        .whereType<Map>()
-        .map((e) => EmojiCategory.fromJson(Map<String, dynamic>.from(e)))
-        .toList();
+    if (GL.catalogTypes.contains(type)) {
+      await ForumCache.instance.saveCatalogResponse(type, map, payload);
+    }
+    return map;
   }
 
   /// WS `status` — прочитано / доставлено (WS_STATUS.md). Fire-and-forget.
@@ -1216,14 +1223,29 @@ class ForumApiClient {
     Map<String, dynamic> message, {
     Duration timeout = const Duration(seconds: 60),
   }) async {
-    final channel = _channel;
-    if (channel == null) {
-      throw StateError('WebSocket не подключён');
-    }
-
     final type = message['type']?.toString();
     if (type == null || type.isEmpty) {
       throw ArgumentError('Поле type обязательно');
+    }
+
+    if (GL.catalogTypes.contains(type)) {
+      final cached = await ForumCache.instance.loadCatalogIfFresh(
+        type,
+        request: message,
+        serverUpdatedAt: GL.updatedAt(type),
+      );
+      if (cached != null) {
+        ApiLogger.instance.logEvent(
+          'CACHE',
+          'WS $type ← catalog (skip network)',
+        );
+        return cached;
+      }
+    }
+
+    final channel = _channel;
+    if (channel == null) {
+      throw StateError('WebSocket не подключён');
     }
 
     // Ждём предыдущий запрос того же type, затем шлём свой.
@@ -1254,6 +1276,9 @@ class ForumApiClient {
           resp['message'].toString(),
           payload: resp,
         );
+      }
+      if (GL.catalogTypes.contains(type)) {
+        await ForumCache.instance.saveCatalogResponse(type, resp, message);
       }
       return resp;
     } on TimeoutException {

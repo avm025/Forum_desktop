@@ -12,6 +12,9 @@ class ForumCache {
   /// v2: после фикса «удалённые сообщения возвращались из msgs_*.json».
   static const int formatVersion = 2;
 
+  static const _logInUpdatedFile = 'log_in_updated.json';
+  static const _catalogFetchedFile = 'catalog_fetched.json';
+
   Directory? _dir;
 
   Future<Directory?> _cacheDir() async {
@@ -78,11 +81,139 @@ class ForumCache {
   }
 
   Future<Map<String, dynamic>?> loadDatabase() async {
+    final catalog = await loadCatalogResponse('database');
+    if (catalog != null) return catalog;
     return _readMap('database.json');
   }
 
   Future<void> saveDatabase(Map<String, dynamic> response) async {
     await _write('database.json', jsonEncode(response));
+    await saveCatalogResponse('database', response);
+  }
+
+  Future<void> saveLogInUpdated(List<Map<String, dynamic>> entries) async {
+    await _write(_logInUpdatedFile, jsonEncode(entries));
+  }
+
+  Future<List<dynamic>?> loadLogInUpdated() async {
+    final dir = await _cacheDir();
+    if (dir == null) return null;
+    try {
+      final file = File('${dir.path}/$_logInUpdatedFile');
+      if (!await file.exists()) return null;
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is List) return decoded;
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> clearLogInUpdated() async {
+    await _delete(_logInUpdatedFile);
+  }
+
+  /// Ключ файла кэша для метода + тела запроса (`ai_list` с разным `prn_id`).
+  String catalogCacheKey(String type, [Map<String, dynamic>? request]) {
+    final t = type.trim();
+    if (request == null || request.isEmpty) return t;
+    final data = request['data'];
+    if (data == null) return t;
+    final encoded = jsonEncode(data)
+        .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    if (encoded.isEmpty || encoded == 'null' || encoded == '{}') return t;
+    // Ограничиваем длину имени файла.
+    final suffix =
+        encoded.length > 80 ? encoded.substring(0, 80) : encoded;
+    return '${t}_$suffix';
+  }
+
+  Future<Map<String, dynamic>?> loadCatalogResponse(
+    String type, [
+    Map<String, dynamic>? request,
+  ]) async {
+    final key = catalogCacheKey(type, request);
+    final wrapped = await _readMap('catalog_$key.json');
+    if (wrapped == null) return null;
+    final response = wrapped['response'];
+    if (response is Map) {
+      return Map<String, dynamic>.from(response);
+    }
+    // Старый формат: весь файл — ответ API.
+    if (wrapped['success'] != null || wrapped['data'] != null) {
+      return wrapped;
+    }
+    return null;
+  }
+
+  Future<DateTime?> catalogFetchedAt(
+    String type, [
+    Map<String, dynamic>? request,
+  ]) async {
+    final key = catalogCacheKey(type, request);
+    final wrapped = await _readMap('catalog_$key.json');
+    if (wrapped != null) {
+      final raw = wrapped['fetched_at']?.toString();
+      final fromFile = DateTime.tryParse(raw ?? '');
+      if (fromFile != null) return fromFile.toUtc();
+    }
+
+    // Method-level дата (как catalog_fetched_* в iOS).
+    final meta = await _readMap(_catalogFetchedFile);
+    final methodRaw = meta?[type]?.toString();
+    final methodDt = DateTime.tryParse(methodRaw ?? '');
+    if (methodDt != null) return methodDt.toUtc();
+
+    // Миграция: старый database.json без fetched_at.
+    if (type == 'database' && request == null) {
+      final dir = await _cacheDir();
+      if (dir == null) return null;
+      final file = File('${dir.path}/database.json');
+      if (await file.exists()) {
+        return (await file.lastModified()).toUtc();
+      }
+    }
+    return null;
+  }
+
+  Future<void> saveCatalogResponse(
+    String type,
+    Map<String, dynamic> response, [
+    Map<String, dynamic>? request,
+  ]) async {
+    final key = catalogCacheKey(type, request);
+    final now = DateTime.now().toUtc();
+    await _write(
+      'catalog_$key.json',
+      jsonEncode({
+        'fetched_at': now.toIso8601String(),
+        'response': response,
+      }),
+    );
+
+    final meta = await _readMap(_catalogFetchedFile) ?? <String, dynamic>{};
+    meta[type] = now.toIso8601String();
+    await _write(_catalogFetchedFile, jsonEncode(meta));
+
+    if (type == 'database') {
+      await _write('database.json', jsonEncode(response));
+    }
+  }
+
+  /// Кэш свежий относительно серверной метки `updated.dt`.
+  ///
+  /// [serverUpdatedAt] == null → строки в LOG_IN_UPDATED ещё нет: отдаём кэш.
+  Future<Map<String, dynamic>?> loadCatalogIfFresh(
+    String type, {
+    Map<String, dynamic>? request,
+    DateTime? serverUpdatedAt,
+  }) async {
+    final cached = await loadCatalogResponse(type, request);
+    if (cached == null) return null;
+    if (serverUpdatedAt == null) return cached;
+
+    final fetched = await catalogFetchedAt(type, request);
+    if (fetched == null) return null;
+    if (fetched.isBefore(serverUpdatedAt.toUtc())) return null;
+    return cached;
   }
 
   Future<void> saveProfile(Map<String, dynamic> profile) async {

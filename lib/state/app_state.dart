@@ -18,6 +18,7 @@ import '../api/api_config.dart';
 import '../api/forum_api_client.dart';
 import '../api/file_uploader.dart';
 import '../api/forward_mapper.dart';
+import '../api/gl.dart';
 import '../api/likes_mapper.dart';
 import '../api/message_mapper.dart';
 import '../api/msg_list_cursors.dart';
@@ -1141,6 +1142,7 @@ class AppState extends ChangeNotifier {
   static bool dlgIdsEqual(String? a, String? b) => _sameDlgId(a, b);
 
   Future<void> initialize() async {
+    await GL.loadPersisted();
     final cachedAppearance = await AppearancePrefs.load();
     if (cachedAppearance != null) {
       _appearance = cachedAppearance;
@@ -1261,6 +1263,7 @@ class AppState extends ChangeNotifier {
       await AuthSession.clear();
       ApiConfig.setSessionToken(null);
       await CallManager.instance.shutdown();
+      await GL.clear();
       await ForumCache.instance.clearAll();
       await DialogLocalPrefs.clear();
       _mutedUntil.clear();
@@ -1590,6 +1593,8 @@ class AppState extends ChangeNotifier {
         // Папки не критичны.
       }
 
+      // После log_in — свежий LOG_IN_UPDATED: сеть только если кэш старше.
+      unawaited(_loadDatabaseCatalogs());
       unawaited(_loadEmojiCatalog());
       unawaited(_resendPendingMessages());
       unawaited(_configureCalls());
@@ -1992,8 +1997,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _loadDatabaseCatalogs() async {
-    final cache = ForumCache.instance;
-    final cached = await cache.loadDatabase();
+    // Сразу UI из диска (до проверки LOG_IN_UPDATED).
+    final cached = await ForumCache.instance.loadDatabase();
     if (cached != null && cached['success'] == true) {
       final data = cached['data'];
       if (data is Map) {
@@ -2003,6 +2008,7 @@ class AppState extends ChangeNotifier {
     }
 
     try {
+      // Сеть только если кэш старше GL.LOG_IN_UPDATED.dt (см. postCatalogHttp).
       final resp = await _api.fetchDatabase();
       final data = resp['data'];
       if (data is Map) {
