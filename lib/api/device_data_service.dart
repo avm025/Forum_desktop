@@ -3,7 +3,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Формирование payload для WS `device` (см. WS_DEVICE.md).
+import '../models/notification_settings.dart';
+
+/// Формирование payload для WS `device` (см. api_forum_doc → device).
 class DeviceDataService {
   DeviceDataService._();
 
@@ -12,6 +14,7 @@ class DeviceDataService {
   static const _appVersion = '1.0.0';
 
   /// Не чаще одного раза в 5 секунд (как `mustExecFromLastTime` в iOS).
+  /// Не применяется к точечным `sendDeviceUpdate` с msg_*.
   static Future<bool> shouldSend() async {
     final prefs = await SharedPreferences.getInstance();
     final lastMs = prefs.getInt(_throttleKey);
@@ -26,7 +29,19 @@ class DeviceDataService {
   }
 
   /// `uid` — тот же UUID, что в `log_in`.
+  /// [notifications] — msg_* флаги устройства (если null — дефолты).
   static Future<Map<String, dynamic>> buildPayload(
+    String uid, {
+    String fcmToken = '',
+    NotificationSettings? notifications,
+  }) async {
+    final base = await _basePayload(uid, fcmToken: fcmToken);
+    final n = notifications ?? NotificationSettings.defaults;
+    base.addAll(n.toDevicePayload());
+    return base;
+  }
+
+  static Future<Map<String, dynamic>> _basePayload(
     String uid, {
     String fcmToken = '',
   }) async {

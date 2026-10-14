@@ -1517,16 +1517,15 @@ class _ProfileFileRowState extends State<_ProfileFileRow> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      if (!_downloaded) {
-        await MediaFileLoader.ensureCached(
-          file,
-          downloadUrl: MediaFileUrl.resolve(file),
-        );
-        if (!mounted) return;
-        setState(() => _downloaded = true);
-      }
+      // Скачивание с прогрессом — внутри viewer / ChatAttachmentViewer.
       if (!mounted) return;
       await ChatAttachmentViewer.show(context, file);
+      if (!mounted) return;
+      final ready = await MediaFileLoader.isDownloaded(
+        file,
+        downloadUrl: MediaFileUrl.resolve(file),
+      );
+      if (mounted && ready) setState(() => _downloaded = true);
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

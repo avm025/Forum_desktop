@@ -5,6 +5,7 @@ import 'package:livekit_client/livekit_client.dart';
 
 import '../api/api_config.dart';
 import '../services/api_logger.dart';
+import '../services/desktop_notification_service.dart';
 import 'call_models.dart';
 import 'signaling_client.dart';
 
@@ -169,7 +170,7 @@ class CallManager extends ChangeNotifier {
     _connectedAt = null;
     _remoteAccepted = false;
     const callId = 'pending';
-    _incoming = null;
+    _clearIncomingInvite();
     _micEnabled = true;
     _camEnabled = video;
     _session = CallSession(
@@ -223,7 +224,7 @@ class CallManager extends ChangeNotifier {
         .toList();
     if (ids.isEmpty) return;
 
-    _incoming = null;
+    _clearIncomingInvite();
     _micEnabled = true;
     _camEnabled = video;
     _session = CallSession(
@@ -257,7 +258,7 @@ class CallManager extends ChangeNotifier {
     _connectedAt = null;
     // Входящий: приняли сами — для hangup/talk это уже «отвеченный» звонок.
     _remoteAccepted = true;
-    _incoming = null;
+    _clearIncomingInvite();
     _micEnabled = true;
     _camEnabled = withVideo || invite.video;
     _session = CallSession(
@@ -305,7 +306,7 @@ class CallManager extends ChangeNotifier {
         peerUserId: invite.callerId,
       ),
     );
-    _incoming = null;
+    _clearIncomingInvite();
     notifyListeners();
   }
 
@@ -660,7 +661,7 @@ class CallManager extends ChangeNotifier {
             peerUserId: invite.callerId,
           ),
         );
-        _incoming = null;
+        _clearIncomingInvite();
         notifyListeners();
       }
       if (_session != null) {
@@ -832,6 +833,26 @@ class CallManager extends ChangeNotifier {
     }
     _incoming = invite;
     notifyListeners();
+    unawaited(
+      DesktopNotificationService.instance.showIncomingCall(
+        callId: invite.callId,
+        callerName: invite.title.isNotEmpty ? invite.title : invite.callerName,
+        video: invite.video,
+        dlgId: invite.dlgId ?? invite.groupId,
+        isGroup: invite.isGroup,
+      ),
+    );
+  }
+
+  void _clearIncomingNotification() {
+    final id = _incoming?.callId;
+    if (id == null || id.isEmpty) return;
+    unawaited(DesktopNotificationService.instance.cancelCall(id));
+  }
+
+  void _clearIncomingInvite() {
+    _clearIncomingNotification();
+    _incoming = null;
   }
 
   Future<void> _connectLiveKit(Map<String, dynamic> map) async {

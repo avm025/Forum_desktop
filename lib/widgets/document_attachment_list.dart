@@ -354,17 +354,24 @@ class _DocumentAttachmentListState extends State<DocumentAttachmentList> {
                         const SizedBox(height: DocumentAttachmentList._rowGap),
                       KeyedSubtree(
                         key: _rowKeys[i],
-                        child: wrapFile(
-                          list[i],
-                          FileRowTile(
-                            file: list[i],
-                            onAccent: widget.onAccent,
-                            maxWidth: widget.maxWidth,
-                            selected: list.length > 1 &&
-                                _selected.contains(_idAt(i)),
-                            onTap: () {
-                              // Клик обрабатывает Listener (выделение / открытие).
-                            },
+                        // Мин. высота: иначе IntrinsicWidth/DragItem
+                        // схлопывают ряд и подпись уезжает наверх.
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(
+                            minHeight: DocumentAttachmentList._approxRowHeight,
+                          ),
+                          child: wrapFile(
+                            list[i],
+                            FileRowTile(
+                              file: list[i],
+                              onAccent: widget.onAccent,
+                              maxWidth: widget.maxWidth,
+                              selected: list.length > 1 &&
+                                  _selected.contains(_idAt(i)),
+                              onTap: () {
+                                // Клик обрабатывает Listener (выделение / открытие).
+                              },
+                            ),
                           ),
                         ),
                       ),

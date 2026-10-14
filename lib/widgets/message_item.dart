@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
@@ -23,13 +24,15 @@ import 'forward_dialog_picker.dart';
 import 'location_preview.dart';
 import 'media_grid.dart';
 import '../utils/attachment_selection.dart';
-import '../utils/chat_message_search.dart';
 import '../utils/file_saver.dart';
 import '../utils/media_display_name.dart';
 import '../utils/media_message_layout.dart';
 import '../utils/media_file_loader.dart';
 import '../utils/mention_markup.dart';
+import '../utils/message_text_format.dart';
 import '../utils/media_file_url.dart';
+import '../utils/media_viewer_context.dart';
+import '../utils/native_media_overlay.dart';
 import 'file_row_tile.dart';
 import 'message_actions_bar.dart';
 import 'message_status_list_sheet.dart';
@@ -201,6 +204,9 @@ class _MessageItemState extends State<MessageItem> {
             },
             child: _Bubble(
               maxWidth: maxBubbleWidth,
+              // IntrinsicWidth схлопывает DragItemWidget у файлов → подпись
+              // оказывается «сверху». Для вложений ширину берём по maxWidth.
+              shrinkWidth: !_useWideFooter,
               borderRadius: _bubbleBorderRadius(),
               color: useBubbles
                   ? (onAccent ? p.outgoingBubble : p.bg3)
@@ -323,14 +329,97 @@ class _MessageItemState extends State<MessageItem> {
   }
 
   Future<void> _openFile(BuildContext context, MediaFile file) async {
-    try {
-      await MediaFileLoader.ensureCached(
-        file,
-        downloadUrl: MediaFileUrl.resolve(file),
-      );
-    } catch (_) {}
+    // Не качаем до открытия — иначе нет лоадера и долгое «молчание».
+    // Прогресс показывает Fullscreen* / ChatAttachmentViewer.
     if (!context.mounted) return;
-    await ChatAttachmentViewer.show(context, file);
+    // Navigator до оверлея: после prepare context сообщения размонтируется.
+    final nav = Navigator.of(context, rootNavigator: true);
+    final excludeDlgId = context.read<AppState>().selectedDialog?.id;
+    await ChatAttachmentViewer.show(
+      context,
+      file,
+      viewerContext: _mediaViewerContext(context),
+      onOverlayAction: (action) => _onMediaOverlayAction(
+        nav: nav,
+        excludeDlgId: excludeDlgId,
+        action: action,
+      ),
+    );
+  }
+
+  MediaViewerContext _mediaViewerContext(BuildContext context) {
+    final state = context.read<AppState>();
+    final dialog = state.selectedDialog;
+    final chatTitle = dialog?.chatName.trim().isNotEmpty == true
+        ? dialog!.chatName.trim()
+        : (message.fr_name.trim().isNotEmpty
+            ? message.fr_name.trim()
+            : 'Forum');
+    return MediaViewerContext.fromMessage(
+      message: message,
+      chatTitle: chatTitle,
+      captionRaw: _displayText(state),
+      dialogId: dialog?.id?.trim() ?? '',
+    );
+  }
+
+  Future<void> _onMediaOverlayAction({
+    required NavigatorState nav,
+    required String? excludeDlgId,
+    required String action,
+  }) async {
+    if (action != 'forward') return;
+    if (!ForwardMapper.canForward(message)) return;
+    // Уже открыто — закрываем текущее и выходим; следующий клик откроет снова.
+    if (NativeMediaOverlay.isForwardBusy) {
+      debugPrint('[Forward] already open → dismiss');
+      NativeMediaOverlay.setDismissAppUiHandler(null);
+      if (nav.canPop()) nav.pop();
+      NativeMediaOverlay.setForwardBusy(false);
+      await NativeMediaOverlay.restoreOverlay();
+      return;
+    }
+
+    final msg = message;
+    NativeMediaOverlay.setForwardBusy(true);
+    final done = Completer<void>();
+    try {
+      debugPrint('[Forward] prepare');
+      await NativeMediaOverlay.prepareForAppUi();
+      NativeMediaOverlay.setDismissAppUiHandler(() {
+        debugPrint('[Forward] dismiss');
+        if (nav.mounted && nav.canPop()) nav.pop();
+        if (!done.isCompleted) done.complete();
+      });
+      debugPrint('[Forward] push');
+      final opened = nav.push<String>(
+        PageRouteBuilder<String>(
+          opaque: true,
+          fullscreenDialog: true,
+          pageBuilder: (ctx, animation, secondaryAnimation) {
+            return Material(
+              color: Theme.of(ctx).scaffoldBackgroundColor,
+              child: ForwardDialogPicker(
+                message: msg,
+                excludeDlgId: excludeDlgId,
+              ),
+            );
+          },
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 48));
+      await NativeMediaOverlay.revealAppUi();
+      debugPrint('[Forward] revealed');
+      await Future.any<void>([opened.then((_) {}), done.future]);
+      debugPrint('[Forward] closed');
+    } catch (e, st) {
+      debugPrint('[Forward] error $e\n$st');
+    } finally {
+      NativeMediaOverlay.setDismissAppUiHandler(null);
+      NativeMediaOverlay.setForwardBusy(false);
+      await NativeMediaOverlay.restoreOverlay();
+      if (!done.isCompleted) done.complete();
+    }
   }
 
   void _onMediaSelectionChanged(List<MediaFile> selected) {
@@ -453,19 +542,24 @@ class _MessageItemState extends State<MessageItem> {
     unawaited(_showActions(globalPosition: globalPosition));
   }
 
-  /// Открытие вложения: докачать при необходимости (как картинки/видео).
+  /// Открытие вложения: сразу viewer (скачивание с прогрессом внутри).
   Future<void> _openAttachment(
     BuildContext context,
     MediaFile file,
   ) async {
-    try {
-      await MediaFileLoader.ensureCached(
-        file,
-        downloadUrl: MediaFileUrl.resolve(file),
-      );
-    } catch (_) {}
     if (!context.mounted) return;
-    await ChatAttachmentViewer.show(context, file);
+    final nav = Navigator.of(context, rootNavigator: true);
+    final excludeDlgId = context.read<AppState>().selectedDialog?.id;
+    await ChatAttachmentViewer.show(
+      context,
+      file,
+      viewerContext: _mediaViewerContext(context),
+      onOverlayAction: (action) => _onMediaOverlayAction(
+        nav: nav,
+        excludeDlgId: excludeDlgId,
+        action: action,
+      ),
+    );
   }
 
   MediaFile _legacyMediaFile() {
@@ -698,6 +792,8 @@ class _MessageItemState extends State<MessageItem> {
         onContextMenu: _onAttachmentContextMenu,
       );
     }
+    // type=media — альбом; type=file (в т.ч. картинка+документ) — список файлов.
+    // MediaGrid для file без width/height сплющивал превью и ломал порядок.
     if (message.isImage && message.hasFiles) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -714,7 +810,6 @@ class _MessageItemState extends State<MessageItem> {
           if (_hasText)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              // Подпись; «изменено» + дата — в футере ниже, как в Telegram.
               child: _text(p, onAccent, innerMaxWidth),
             ),
         ],
@@ -740,15 +835,24 @@ class _MessageItemState extends State<MessageItem> {
       return _legacyFileTile(p, onAccent);
     }
 
-    return DocumentAttachmentList(
-      files: files,
-      onAccent: onAccent,
-      maxWidth: innerMaxWidth,
-      onOpen: (file) => _openAttachment(context, file),
-      onSelectionChanged: _onMediaSelectionChanged,
-      onContextMenu: _onAttachmentContextMenu,
-      // Подпись; «изменено» + дата — в футере пузыря ниже.
-      footer: _hasText ? _text(p, onAccent, innerMaxWidth) : null,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        DocumentAttachmentList(
+          files: files,
+          onAccent: onAccent,
+          maxWidth: innerMaxWidth,
+          onOpen: (file) => _openAttachment(context, file),
+          onSelectionChanged: _onMediaSelectionChanged,
+          onContextMenu: _onAttachmentContextMenu,
+        ),
+        if (_hasText)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: _text(p, onAccent, innerMaxWidth),
+          ),
+      ],
     );
   }
 
@@ -870,6 +974,7 @@ class _MessageItemState extends State<MessageItem> {
 
 class _Bubble extends StatelessWidget {
   final double maxWidth;
+  final bool shrinkWidth;
   final BorderRadius borderRadius;
   final Color color;
   final EdgeInsets padding;
@@ -886,12 +991,22 @@ class _Bubble extends StatelessWidget {
     required this.color,
     required this.padding,
     required this.child,
+    this.shrinkWidth = true,
     this.liquidGlass = false,
     this.opacity = 1,
     this.highlightBorder = false,
     this.highlightColor,
     this.flat = false,
   });
+
+  Widget _widthWrap(Widget child) {
+    final constrained = ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: child,
+    );
+    if (!shrinkWidth) return constrained;
+    return IntrinsicWidth(child: constrained);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -909,10 +1024,7 @@ class _Bubble extends StatelessWidget {
           child: content,
         );
       }
-      return ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxWidth),
-        child: IntrinsicWidth(child: content),
-      );
+      return _widthWrap(content);
     }
 
     final fill = color.withValues(alpha: liquidGlass ? opacity : 1.0);
@@ -947,12 +1059,7 @@ class _Bubble extends StatelessWidget {
       );
     }
 
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
-      child: IntrinsicWidth(
-        child: bubble,
-      ),
-    );
+    return _widthWrap(bubble);
   }
 }
 
@@ -1006,7 +1113,7 @@ class _SenderHeader extends StatelessWidget {
   }
 }
 
-/// Текст сообщения: drag — выделение без системного toolbar.
+/// Текст сообщения: Markdown/HTML + выделение без системного toolbar.
 /// ПКМ / простой тап обрабатываются отдельно (SelectableText глотает secondary).
 class _MessageBodyText extends StatefulWidget {
   final String text;
@@ -1037,6 +1144,64 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
   Offset? _downGlobal;
   bool _dragged = false;
   bool _secondary = false;
+  final List<TapGestureRecognizer> _linkRecognizers = [];
+  TextSpan? _span;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _rebuildSpan();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MessageBodyText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text ||
+        oldWidget.style != widget.style ||
+        oldWidget.searchQuery != widget.searchQuery ||
+        oldWidget.highlightColor != widget.highlightColor) {
+      _rebuildSpan();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposeRecognizers();
+    super.dispose();
+  }
+
+  void _disposeRecognizers() {
+    for (final r in _linkRecognizers) {
+      r.dispose();
+    }
+    _linkRecognizers.clear();
+  }
+
+  void _rebuildSpan() {
+    _disposeRecognizers();
+    final p = context.palette;
+    final baseColor = widget.style.color ?? p.text1;
+    final linkColor = baseColor.computeLuminance() > 0.6
+        ? const Color(0xFF9ED0FF)
+        : p.purple;
+    final highlight = widget.highlightColor ??
+        (widget.style.color ?? Colors.white).withValues(alpha: 0.35);
+    _span = MessageTextFormat.rich(
+      raw: widget.text,
+      style: widget.style,
+      linkColor: linkColor,
+      recognizers: _linkRecognizers,
+      onLinkTap: (url) => unawaited(_openLink(url)),
+      searchQuery: widget.searchQuery,
+      highlightColor: highlight,
+    );
+  }
+
+  Future<void> _openLink(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
 
   void _onPointerDown(PointerDownEvent e) {
     _downGlobal = e.position;
@@ -1074,46 +1239,15 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
     _secondary = false;
   }
 
-  Widget _buildVisibleText() {
-    final query = widget.searchQuery?.trim();
-    if (query == null || query.isEmpty) {
-      return Text(widget.text, style: widget.style);
-    }
-
-    final parts = ChatMessageSearch.highlightParts(widget.text, query);
-    final highlight = widget.highlightColor ??
-        (widget.style.color ?? Colors.white).withValues(alpha: 0.35);
-
-    return Text.rich(
-      TextSpan(
-        children: [
-          for (final part in parts)
-            TextSpan(
-              text: part.text,
-              style: widget.style.copyWith(
-                backgroundColor: part.match ? highlight : null,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final textStack = Stack(
-      children: [
-        _buildVisibleText(),
-        SelectableText(
-          widget.text,
-          style: widget.style.copyWith(color: Colors.transparent),
-          selectionColor: (widget.style.color ?? Colors.white)
-              .withValues(alpha: 0.35),
-          contextMenuBuilder: (context, editableTextState) =>
-              const SizedBox.shrink(),
-          magnifierConfiguration: TextMagnifierConfiguration.disabled,
-        ),
-      ],
+    final text = SelectableText.rich(
+      _span ?? TextSpan(text: widget.text, style: widget.style),
+      selectionColor: (widget.style.color ?? Colors.white)
+          .withValues(alpha: 0.35),
+      contextMenuBuilder: (context, editableTextState) =>
+          const SizedBox.shrink(),
+      magnifierConfiguration: TextMagnifierConfiguration.disabled,
     );
 
     return Listener(
@@ -1124,12 +1258,12 @@ class _MessageBodyTextState extends State<_MessageBodyText> {
       onPointerCancel: _onPointerCancel,
       // Как в Telegram: мета («изменено» + дата) под текстом справа.
       child: widget.footer == null
-          ? textStack
+          ? text
           : Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                textStack,
+                text,
                 const SizedBox(height: 2),
                 Align(
                   alignment: Alignment.centerRight,

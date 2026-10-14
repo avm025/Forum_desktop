@@ -108,40 +108,40 @@ class _ForwardDialogPickerState extends State<ForwardDialogPicker> {
     return Scaffold(
       backgroundColor: p.bg1,
       resizeToAvoidBottomInset: true,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _header(p),
-            _searchField(p),
-            const SizedBox(height: 4),
-            Expanded(
-              child: dialogs.isEmpty
-                  ? _emptyState(p)
-                  : ListView.builder(
-                      padding: EdgeInsets.zero,
-                      itemCount: dialogs.length,
-                      itemBuilder: (context, index) {
-                        final dialog = dialogs[index];
-                        final dlgId = dialog.id!.trim();
-                        return DialogTile(
-                          dialog: dialog,
-                          selected: _selectedIds.contains(dlgId),
-                          onTap: () => _select(dlgId),
-                        );
-                      },
-                    ),
-            ),
-            if (_selectedIds.isNotEmpty) _composer(p),
-          ],
-        ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Отступ под системный крестик / titlebar macOS.
+          const SizedBox(height: 36),
+          _header(p),
+          _searchField(p),
+          const SizedBox(height: 4),
+          Expanded(
+            child: dialogs.isEmpty
+                ? _emptyState(p)
+                : ListView.builder(
+                    padding: EdgeInsets.zero,
+                    itemCount: dialogs.length,
+                    itemBuilder: (context, index) {
+                      final dialog = dialogs[index];
+                      final dlgId = dialog.id!.trim();
+                      return DialogTile(
+                        dialog: dialog,
+                        selected: _selectedIds.contains(dlgId),
+                        onTap: () => _select(dlgId),
+                      );
+                    },
+                  ),
+          ),
+          if (_selectedIds.isNotEmpty) _composer(p),
+        ],
       ),
     );
   }
 
   Widget _header(ForumPalette p) {
     return SizedBox(
-      height: 56,
+      height: 48,
       child: Stack(
         alignment: Alignment.center,
         children: [

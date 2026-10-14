@@ -22,6 +22,7 @@ class DialogMapper {
     String? currentUserId,
   }) {
     final isGrp = _parseFlag(json['is_grp']);
+    final isCh = _parseFlag(json['is_ch']);
     final dlgId =
         json['dlg_id']?.toString() ?? json['id']?.toString() ?? '';
     final usr1Id = json['usr1_id']?.toString() ?? '';
@@ -129,10 +130,13 @@ class DialogMapper {
       last_msg_fr_id: last.frId.isNotEmpty
           ? last.frId
           : (json['usr1_id']?.toString() ?? ''),
+      // Каналы: не подставляем usr1_name (= имя канала) как «отправителя».
       last_msg_fr_name: sanitizeUtf16(
-        last.frName.isNotEmpty
-            ? last.frName
-            : (json['usr1_name']?.toString() ?? ''),
+        isCh
+            ? ''
+            : (last.frName.isNotEmpty
+                ? last.frName
+                : (isGrp ? (json['usr1_name']?.toString() ?? '') : '')),
       ),
       last_msg_dttmcr: last.time.isNotEmpty
           ? last.time
@@ -142,6 +146,7 @@ class DialogMapper {
       tagged: _parseInt(json['tagged']),
       chatType: isGrp ? ChatType.groupChat : ChatType.privateChat,
       isGrp: isGrp,
+      isCh: isCh,
       pin: _parseInt(json['pin']),
       phone: phone,
       fav: _parseFlag(json['fav']),

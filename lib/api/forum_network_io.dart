@@ -20,11 +20,12 @@ HttpClient createForumRawHttpClient() {
 
 http.Client createForumHttpClient() => IOClient(createForumRawHttpClient());
 
-WebSocketChannel connectForumWebSocket(Uri uri) {
-  return IOWebSocketChannel.connect(
-    uri,
+Future<WebSocketChannel> connectForumWebSocket(Uri uri) async {
+  final channel = IOWebSocketChannel.connect(
+    _normalizeWsUri(uri),
     customClient: createForumRawHttpClient(),
   );
+  return channel;
 }
 
 /// Call signaling: явный HTTP/1.1 Upgrade через [WebSocket.connect]
@@ -33,8 +34,9 @@ Future<WebSocketChannel> connectCallSignalingWebSocket(
   Uri uri, {
   Map<String, dynamic>? headers,
 }) async {
+  final normalized = _normalizeWsUri(uri);
   final socket = await WebSocket.connect(
-    uri.toString(),
+    normalized.toString(),
     customClient: createForumRawHttpClient(),
     headers: {
       'Origin': 'https://4um.me',
@@ -44,4 +46,26 @@ Future<WebSocketChannel> connectCallSignalingWebSocket(
   return IOWebSocketChannel(socket);
 }
 
+/// wss://host/path без порта → Uri.port == 0 → Dart может слать :0 (400).
+Uri _normalizeWsUri(Uri uri) {
+  if (uri.hasPort && uri.port != 0) return uri;
+  final scheme = uri.scheme.toLowerCase();
+  final port = (scheme == 'https' || scheme == 'wss')
+      ? 443
+      : (scheme == 'http' || scheme == 'ws')
+          ? 80
+          : 443;
+  return uri.replace(port: port);
+}
+
 Future<void> awaitWebSocketReady(WebSocketChannel channel) => channel.ready;
+
+/// Закрытие WS при sleep/quit — сервер сразу offline для FCM.
+Future<void> forceCloseWebSocket(WebSocketChannel? channel) async {
+  if (channel == null) return;
+  try {
+    await channel.sink
+        .close(WebSocketStatus.goingAway)
+        .timeout(const Duration(milliseconds: 800));
+  } catch (_) {}
+}

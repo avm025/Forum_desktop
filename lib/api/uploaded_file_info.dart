@@ -65,13 +65,23 @@ class UploadedFileInfo {
   }
 
   /// Элемент массива `files` в body сообщения type=file.
-  Map<String, String> toDocumentFileJson({required String title}) {
-    return {
-      'kind': kind,
+  Map<String, String> toDocumentFileJson({
+    required String title,
+    String? kind,
+    String width = '',
+    String height = '',
+  }) {
+    final out = <String, String>{
+      'kind': (kind != null && kind.trim().isNotEmpty) ? kind.trim() : this.kind,
       'title': title,
       'size': size.toString(),
       'fname': fname,
       'fdir': fdir,
     };
+    final w = width.trim();
+    final h = height.trim();
+    if (w.isNotEmpty && w != '0') out['width'] = w;
+    if (h.isNotEmpty && h != '0') out['height'] = h;
+    return out;
   }
 }

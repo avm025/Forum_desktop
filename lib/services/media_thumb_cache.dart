@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
@@ -18,6 +19,12 @@ class MediaThumbCache {
   static final _knownPaths = <String, String>{};
   static String? _basePath;
 
+  /// Каналы: десятки mp4 без preview — не дёргаем AVFoundation пачкой.
+  static const _maxVideoThumbJobs = 2;
+  static int _activeVideoJobs = 0;
+  static final _videoWaiters = <Completer<void>>[];
+  static const _videoThumbTimeout = Duration(seconds: 8);
+
   static Future<Directory> _cacheDir() async {
     if (_basePath != null) {
       return Directory(_basePath!);
@@ -31,16 +38,35 @@ class MediaThumbCache {
     return dir;
   }
 
+  /// v2: кадр не с t=0 (часто чёрный у канальных mp4), старый кэш не переиспользуем.
+  static const _cacheEpoch = 'v2';
+
   static String cacheKey(MediaFile file) {
-    if (file.hash.isNotEmpty) return file.hash;
-    if (file.fname.isNotEmpty) {
-      final dir = file.fdir.replaceAll('/', '_');
-      return '${dir}_${file.fname}';
+    // Локальный путь стабилен на всём пути upload → hash; иначе превью
+    // пропадает до «доставлено» и снова генерируется.
+    final local = file.URL?.trim() ?? '';
+    if (local.isNotEmpty && !local.startsWith('http')) {
+      return 'local_${local.hashCode.toRadixString(16)}_$_cacheEpoch';
     }
-    if (file.url.isNotEmpty) {
-      return file.url.hashCode.toRadixString(16);
-    }
-    return 'unknown_${file.kind}';
+    final base = () {
+      if (file.hash.isNotEmpty) return file.hash;
+      if (file.fname.isNotEmpty) {
+        final dir = file.fdir.replaceAll('/', '_');
+        return '${dir}_${file.fname}';
+      }
+      if (file.url.isNotEmpty) {
+        return file.url.hashCode.toRadixString(16);
+      }
+      return 'unknown_${file.kind}';
+    }();
+    return '${base}_$_cacheEpoch';
+  }
+
+  /// Поделиться уже готовым JPEG-превью между версиями MediaFile.
+  static void alias(MediaFile from, MediaFile to) {
+    final existing = peekSync(from);
+    if (existing == null) return;
+    _knownPaths[cacheKey(to)] = existing.path;
   }
 
   static Future<File> _cacheFile(MediaFile file) async {
@@ -78,6 +104,18 @@ class MediaThumbCache {
   static Future<File?> getIfExists(MediaFile file) async {
     final f = await _cacheFile(file);
     if (await f.exists() && await f.length() > 0) {
+      // Чёрный JPEG с t=0 у удалённых/канальных mp4 ~5 КБ — перегенерируем.
+      // Локальные video note часто дают компактный валидный кадр — не трогаем.
+      final isVideo = file.isVideo || FileKind.isVideoKind(file.kind);
+      final local = file.URL?.trim() ?? '';
+      final isLocal = local.isNotEmpty && !local.startsWith('http');
+      final len = await f.length();
+      if (isVideo && !isLocal && len > 0 && len < 9000) {
+        try {
+          await f.delete();
+        } catch (_) {}
+        return null;
+      }
       if (await _isValidImageFile(f)) {
         _remember(f, file);
         return f;
@@ -213,13 +251,41 @@ class MediaThumbCache {
     return MediaFileUrl.resolve(file);
   }
 
+  static Future<void> _acquireVideoSlot() async {
+    if (_activeVideoJobs < _maxVideoThumbJobs) {
+      _activeVideoJobs++;
+      return;
+    }
+    final waiter = Completer<void>();
+    _videoWaiters.add(waiter);
+    await waiter.future;
+    _activeVideoJobs++;
+  }
+
+  static void _releaseVideoSlot() {
+    _activeVideoJobs = (_activeVideoJobs - 1).clamp(0, _maxVideoThumbJobs);
+    while (_videoWaiters.isNotEmpty && _activeVideoJobs < _maxVideoThumbJobs) {
+      final next = _videoWaiters.removeAt(0);
+      if (!next.isCompleted) next.complete();
+    }
+  }
+
   static Future<void> _ensureVideoThumbnail(MediaFile file, File out) async {
+    // Уже готовый локальный JPEG (video note) — просто копируем.
+    final localPreview = file.preview.trim();
+    if (localPreview.isNotEmpty &&
+        !localPreview.startsWith('http') &&
+        File(localPreview).existsSync()) {
+      await File(localPreview).copy(out.path);
+      return;
+    }
+
     if (file.preview.startsWith('http')) {
       try {
         await _downloadPhotoThumbnail(file, out);
         return;
       } catch (_) {
-        // fallback — первый кадр
+        // fallback — кадр из видео
       }
     }
 
@@ -227,31 +293,54 @@ class MediaThumbCache {
       throw UnsupportedError('Извлечение кадра видео доступно только на macOS/iOS');
     }
 
-    if (file.url.startsWith('http')) {
-      try {
-        await VideoConverter.extractThumbnailFromUrl(
-          inputUrl: file.url,
+    await _acquireVideoSlot();
+    try {
+      // СНАЧАЛА локальный mp4 (исходящее видеосообщение). Иначе resolve()
+      // собирает http URL по fname → долгий/пустой remote и превью только
+      // после доставки.
+      final localPath = file.URL?.trim() ?? '';
+      if (localPath.isNotEmpty &&
+          !localPath.startsWith('http') &&
+          File(localPath).existsSync()) {
+        await VideoConverter.extractThumbnail(
+          inputPath: localPath,
           outputPath: out.path,
-        );
+        ).timeout(_videoThumbTimeout);
         return;
-      } catch (_) {
-        // fallback — локальный файл
       }
-    }
 
-    final source = await MediaFileLoader.resolve(file);
-    if (!source.hasLocalPath) {
-      throw StateError('Не удалось получить видеофайл');
-    }
+      final cached = await MediaFileLoader.cachedPathIfExists(file);
+      if (cached != null) {
+        await VideoConverter.extractThumbnail(
+          inputPath: cached,
+          outputPath: out.path,
+        ).timeout(_videoThumbTimeout);
+        return;
+      }
 
-    await VideoConverter.extractThumbnail(
-      inputPath: source.localPath!,
-      outputPath: out.path,
-    );
+      final url = file.url.startsWith('http')
+          ? file.url
+          : MediaFileUrl.resolve(file);
+      if (url.startsWith('http')) {
+        await VideoConverter.extractThumbnailFromUrl(
+          inputUrl: url,
+          outputPath: out.path,
+        ).timeout(_videoThumbTimeout);
+        return;
+      }
+
+      throw StateError('Нет локального видео для превью');
+    } finally {
+      _releaseVideoSlot();
+    }
   }
 
   static bool needsRemoteThumbnail(MediaFile file) {
     if (!_canGenerateThumbnail(file)) return false;
+    // Видео: bytes/URL указывают на mp4 — нужен кадр-превью (в т.ч. локальный).
+    if (file.isVideo || FileKind.isVideoKind(file.kind)) {
+      return true;
+    }
     if (file.bytes != null && file.bytes!.isNotEmpty) return false;
     if (file.URL != null && file.URL!.isNotEmpty) return false;
     return file.url.isNotEmpty || file.preview.startsWith('http');

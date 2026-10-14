@@ -189,55 +189,142 @@ class ForumVideoConverterPlugin: NSObject, FlutterPlugin {
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
       generator.maximumSize = CGSize(width: 640, height: 640)
+      // Иначе на remote HLS/mp4 часто берётся «ближайший» чёрный keyframe.
+      generator.requestedTimeToleranceBefore = .zero
+      generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
 
-      do {
-        let cgImage = try generator.copyCGImage(at: .zero, actualTime: nil)
-        let outURL = URL(fileURLWithPath: outputPath)
-        try? FileManager.default.removeItem(at: outURL)
+      let durationSec = CMTimeGetSeconds(asset.duration)
+      // Короткие video note — быстро 1–2 кадра; длинные/канальные — несколько точек.
+      let candidates: [Double]
+      if durationSec.isFinite && durationSec > 0 && durationSec <= 60 {
+        let mid = min(max(durationSec * 0.35, 0.15), max(durationSec - 0.05, 0))
+        candidates = [mid, 0.0]
+      } else {
+        var long: [Double] = [1.0, 2.0, 3.0, 5.0]
+        if durationSec.isFinite && durationSec > 0 {
+          long.append(min(durationSec * 0.1, 15.0))
+          long.append(min(durationSec * 0.25, 30.0))
+        }
+        long.append(0.0)
+        candidates = long
+      }
 
-        guard let destination = CGImageDestinationCreateWithURL(
-          outURL as CFURL,
-          UTType.jpeg.identifier as CFString,
-          1,
-          nil
-        ) else {
-          DispatchQueue.main.async {
-            result(FlutterError(
-              code: "THUMB_FAILED",
-              message: "Cannot create image destination",
-              details: nil
-            ))
+      var lastError: Error?
+      var chosen: CGImage?
+
+      for sec in candidates {
+        if durationSec.isFinite && durationSec > 0.05 && sec >= durationSec {
+          continue
+        }
+        let time = CMTime(seconds: max(0, sec), preferredTimescale: 600)
+        do {
+          let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
+          if !Self.isMostlyBlack(cgImage) {
+            chosen = cgImage
+            break
           }
-          return
-        }
-
-        let options = [
-          kCGImageDestinationLossyCompressionQuality: 0.75,
-        ] as CFDictionary
-        CGImageDestinationAddImage(destination, cgImage, options)
-        guard CGImageDestinationFinalize(destination) else {
-          DispatchQueue.main.async {
-            result(FlutterError(
-              code: "THUMB_FAILED",
-              message: "Cannot write JPEG",
-              details: nil
-            ))
+          // Чёрный — оставляем как fallback, ищем дальше.
+          if chosen == nil {
+            chosen = cgImage
           }
-          return
+        } catch {
+          lastError = error
         }
+      }
 
-        DispatchQueue.main.async {
-          result(outputPath)
-        }
-      } catch {
+      guard let cgImage = chosen else {
         DispatchQueue.main.async {
           result(FlutterError(
             code: "THUMB_FAILED",
-            message: error.localizedDescription,
+            message: lastError?.localizedDescription ?? "No frame",
             details: nil
           ))
         }
+        return
+      }
+
+      let outURL = URL(fileURLWithPath: outputPath)
+      try? FileManager.default.removeItem(at: outURL)
+
+      guard let destination = CGImageDestinationCreateWithURL(
+        outURL as CFURL,
+        UTType.jpeg.identifier as CFString,
+        1,
+        nil
+      ) else {
+        DispatchQueue.main.async {
+          result(FlutterError(
+            code: "THUMB_FAILED",
+            message: "Cannot create image destination",
+            details: nil
+          ))
+        }
+        return
+      }
+
+      let options = [
+        kCGImageDestinationLossyCompressionQuality: 0.75,
+      ] as CFDictionary
+      CGImageDestinationAddImage(destination, cgImage, options)
+      guard CGImageDestinationFinalize(destination) else {
+        DispatchQueue.main.async {
+          result(FlutterError(
+            code: "THUMB_FAILED",
+            message: "Cannot write JPEG",
+            details: nil
+          ))
+        }
+        return
+      }
+
+      DispatchQueue.main.async {
+        result(outputPath)
       }
     }
+  }
+
+  /// Кадр «почти чёрный» (типичный intro у канальных mp4) — не годится в превью.
+  private static func isMostlyBlack(_ image: CGImage) -> Bool {
+    let width = min(image.width, 48)
+    let height = min(image.height, 48)
+    guard width > 0, height > 0 else { return true }
+
+    let bytesPerPixel = 4
+    let bytesPerRow = width * bytesPerPixel
+    var data = [UInt8](repeating: 0, count: height * bytesPerRow)
+    guard let ctx = CGContext(
+      data: &data,
+      width: width,
+      height: height,
+      bitsPerComponent: 8,
+      bytesPerRow: bytesPerRow,
+      space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else {
+      return false
+    }
+    ctx.interpolationQuality = .low
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+    var sum = 0
+    var count = 0
+    var bright = 0
+    let step = 2
+    for y in stride(from: 0, to: height, by: step) {
+      for x in stride(from: 0, to: width, by: step) {
+        let i = y * bytesPerRow + x * bytesPerPixel
+        let r = Int(data[i])
+        let g = Int(data[i + 1])
+        let b = Int(data[i + 2])
+        let lum = (r + g + b) / 3
+        sum += lum
+        count += 1
+        if lum > 40 { bright += 1 }
+      }
+    }
+    guard count > 0 else { return true }
+    let avg = sum / count
+    // Чёрный кадр: низкая средняя яркость и почти нет светлых пикселей.
+    return avg < 18 && bright * 100 / count < 3
   }
 }

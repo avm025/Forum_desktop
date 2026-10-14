@@ -31,7 +31,9 @@ dependencies:
   super_drag_and_drop: ^0.9.1
   super_clipboard: ^0.9.1
   livekit_client: ^2.11.0
-
+  flutter_local_notifications: ^22.3.1
+  record: ^7.1.2
+  camera_macos: ^0.1.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -4,7 +4,19 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 /// Web / WASM: стандартное подключение без dart:io.
 http.Client createForumHttpClient() => http.Client();
 
-WebSocketChannel connectForumWebSocket(Uri uri) => WebSocketChannel.connect(uri);
+Future<WebSocketChannel> connectForumWebSocket(Uri uri) async {
+  final channel = WebSocketChannel.connect(uri);
+  try {
+    await channel.ready;
+  } catch (_) {}
+  return channel;
+}
+
+Future<void> forceCloseWebSocket(WebSocketChannel? channel) async {
+  try {
+    await channel?.sink.close();
+  } catch (_) {}
+}
 
 Future<WebSocketChannel> connectCallSignalingWebSocket(
   Uri uri, {

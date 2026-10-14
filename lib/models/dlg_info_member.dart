@@ -62,12 +62,17 @@ class DlgInfoResult {
   final String? about;
   final String? groupNick;
   final String? groupDesc;
+  /// `data[].is_ch` — канал (системная папка «Каналы»).
+  final bool isCh;
+  final String? dlgId;
 
   const DlgInfoResult({
     this.users = const [],
     this.about,
     this.groupNick,
     this.groupDesc,
+    this.isCh = false,
+    this.dlgId,
   });
 
   factory DlgInfoResult.fromResponse(Map<String, dynamic> resp) {
@@ -94,17 +99,52 @@ class DlgInfoResult {
     Map<String, dynamic>? dataMap;
     if (data is Map) {
       dataMap = Map<String, dynamic>.from(data);
+    } else if (data is List && data.isNotEmpty && data.first is Map) {
+      dataMap = Map<String, dynamic>.from(data.first as Map);
+    }
+
+    final isChRaw = dataMap?['is_ch'] ?? resp['is_ch'];
+    final isCh = isChRaw == true ||
+        isChRaw == 1 ||
+        isChRaw?.toString().trim() == '1';
+
+    final dlgId = dataMap?['dlg_id']?.toString() ??
+        dataMap?['id']?.toString() ??
+        resp['dlg_id']?.toString();
+
+    // У канала `data` иногда [] — имя/аватар берём у владельца (phone == dlg_id).
+    var groupNick = resp['nick']?.toString() ??
+        dataMap?['nick']?.toString() ??
+        dataMap?['name']?.toString();
+    if ((groupNick == null || groupNick.trim().isEmpty) && dlgId != null) {
+      DlgInfoMember? owner;
+      for (final u in users) {
+        if (u.phone.trim() == dlgId.trim() && u.name.trim().isNotEmpty) {
+          owner = u;
+          break;
+        }
+      }
+      if (owner == null) {
+        for (final u in users) {
+          if (u.isOwner && u.name.trim().isNotEmpty) {
+            owner = u;
+            break;
+          }
+        }
+      }
+      groupNick = owner?.name;
     }
 
     return DlgInfoResult(
       users: users,
       about: resp['about']?.toString() ??
           dataMap?['about']?.toString(),
-      groupNick: resp['nick']?.toString() ??
-          dataMap?['nick']?.toString(),
+      groupNick: groupNick,
       groupDesc: resp['desc']?.toString() ??
           dataMap?['desc']?.toString() ??
           resp['description']?.toString(),
+      isCh: isCh,
+      dlgId: dlgId,
     );
   }
 }

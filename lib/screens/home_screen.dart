@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,7 +12,6 @@ import '../widgets/bottom_nav_bar.dart';
 import '../widgets/chat_panel_host.dart';
 import '../widgets/chat_pane_background.dart';
 import '../widgets/dialogs_sidebar.dart';
-import '../models/dialogs_list_view_model.dart';
 
 /// Главный экран: адаптивный двухпанельный layout.
 class HomeScreen extends StatefulWidget {
@@ -23,6 +24,9 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  /// Сохраняет State чата (в т.ч. запись голоса) при смене wide↔narrow.
+  final GlobalKey _chatPanelKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
@@ -37,8 +41,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      context.read<AppState>().onAppResumed();
+    final app = context.read<AppState>();
+    switch (state) {
+      case AppLifecycleState.resumed:
+        app.setAppInForeground(true);
+        app.onAppResumed();
+      case AppLifecycleState.inactive:
+        // macOS: потеря фокуса окна (другое приложение / свёртка).
+        app.setAppInForeground(false);
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        app.setAppInForeground(false);
+      case AppLifecycleState.detached:
+        app.setAppInForeground(false);
+        unawaited(app.prepareForTerminate());
     }
   }
 
@@ -49,7 +65,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     final wide =
         MediaQuery.sizeOf(context).width >= HomeScreen._twoPaneBreakpoint;
-    final navUnderSidebar = wide && state.navTab == BottomNavTab.chats;
+    // Как у чатов: таббар внизу левой колонки (чаты / проекты / профиль).
+    final navUnderLeft = wide &&
+        (state.navTab == BottomNavTab.chats ||
+            state.navTab == BottomNavTab.projects ||
+            state.navTab == BottomNavTab.profile);
 
     return Scaffold(
       backgroundColor: p.bg1,
@@ -87,7 +107,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
             ),
           Expanded(child: _buildBody(context, state, p, wide: wide)),
-          if (!navUnderSidebar)
+          if (!navUnderLeft)
             const SafeArea(
               top: false,
               child: ForumBottomNav(),
@@ -107,11 +127,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // (поля ввода/скролл) при активации ломают layout.
     return switch (state.navTab) {
       BottomNavTab.chats => _buildChatsPane(context, state, p, wide: wide),
-      BottomNavTab.projects => _PlaceholderTab(palette: p, title: 'Проекты'),
-      BottomNavTab.tasks => _PlaceholderTab(palette: p, title: 'Задачи'),
+      BottomNavTab.projects =>
+        _buildProjectsPane(context, state, p, wide: wide),
       BottomNavTab.newLog => const ApiLogScreen(),
-      BottomNavTab.profile => const ProfileScreen(),
+      BottomNavTab.profile => ProfileScreen(showNavInLeftPane: wide),
     };
+  }
+
+  Widget _buildProjectsPane(
+    BuildContext context,
+    AppState state,
+    ForumPalette p, {
+    required bool wide,
+  }) {
+    if (!wide) {
+      return _PlaceholderTab(palette: p, title: 'Проекты');
+    }
+    // Как чаты: слева контент + таббар, справа пустая панель.
+    const leftW = 375.0;
+    return Row(
+      children: [
+        SizedBox(
+          width: leftW,
+          child: Column(
+            children: [
+              Expanded(child: _PlaceholderTab(palette: p, title: 'Проекты')),
+              const SafeArea(
+                top: false,
+                child: ForumBottomNav(),
+              ),
+            ],
+          ),
+        ),
+        Container(width: 1, color: p.border1),
+        const Expanded(child: ChatPaneBackground(child: SizedBox.expand())),
+      ],
+    );
   }
 
   Widget _buildChatsPane(
@@ -124,36 +175,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // MediaQuery вместо LayoutBuilder: иначе при смене чата OverlayPortal
     // (Scrollbar/Navigator) активируется внутри performLayout → краш.
 
+    // Один и тот же GlobalKey: при пересечении breakpoint 760 панель чата
+    // не пересоздаётся — запись голоса и поле ввода не сбрасываются.
+    final chatPanel = ChatPanelHost(
+      key: _chatPanelKey,
+      selected: selected,
+      dialogs: state.dialogs,
+      showBack: !wide && selected != null,
+      emptyChild: wide ? const _NoChatSelected() : const DialogsSidebar(),
+    );
+
     if (wide) {
       return _ResizableChatsSplit(
         totalWidth: MediaQuery.sizeOf(context).width,
-        selected: selected,
-        dialogs: state.dialogs,
-        emptyChild: const _NoChatSelected(),
+        chatPanel: chatPanel,
       );
     }
 
-    return ChatPanelHost(
-      selected: selected,
-      dialogs: state.dialogs,
-      showBack: selected != null,
-      emptyChild: const DialogsSidebar(),
-    );
+    return chatPanel;
   }
 }
 
 /// Двухпанельный режим: список чатов ↔ сообщения, ширина тянется мышкой.
 class _ResizableChatsSplit extends StatefulWidget {
   final double totalWidth;
-  final DialogsListViewModel? selected;
-  final List<DialogsListViewModel> dialogs;
-  final Widget emptyChild;
+  final Widget chatPanel;
 
   const _ResizableChatsSplit({
     required this.totalWidth,
-    required this.selected,
-    required this.dialogs,
-    required this.emptyChild,
+    required this.chatPanel,
   });
 
   @override
@@ -269,13 +319,7 @@ class _ResizableChatsSplitState extends State<_ResizableChatsSplit> {
             ),
           ),
         ),
-        Expanded(
-          child: ChatPanelHost(
-            selected: widget.selected,
-            dialogs: widget.dialogs,
-            emptyChild: widget.emptyChild,
-          ),
-        ),
+        Expanded(child: widget.chatPanel),
       ],
     );
   }

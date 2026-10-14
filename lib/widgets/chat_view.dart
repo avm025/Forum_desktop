@@ -854,10 +854,12 @@ class _ChatViewState extends State<ChatView> {
     final dlgId = dialog.id;
     final isBlankChat = DialogsListViewModel.isPlaceholderDlgId(dlgId) ||
         dialog.isNewContactWithoutDialog;
-    final historyReady =
-        isBlankChat || state.isDialogHistoryReady(dlgId);
+    // Кэш/уже загруженные msgs показываем сразу — не ждём сеть
+    // (особенно каналы с тяжёлыми media).
+    final historyReady = isBlankChat ||
+        state.isDialogHistoryReady(dlgId) ||
+        messages.isNotEmpty;
 
-    // Ждём первую страницу (~100), кэш до этого не показываем.
     final loading = !historyReady;
     final loadingOlder = state.messagesLoadingOlder;
     final error = state.messagesError;
@@ -942,6 +944,12 @@ class _ChatViewState extends State<ChatView> {
                 ),
               ),
             ),
+          if (loading)
+            LinearProgressIndicator(
+              minHeight: 2,
+              color: p.purple,
+              backgroundColor: p.purple.withValues(alpha: 0.12),
+            ),
           Expanded(
             child: loading
                 ? Center(
@@ -951,7 +959,9 @@ class _ChatViewState extends State<ChatView> {
                         CircularProgressIndicator(color: p.purple),
                         const SizedBox(height: 12),
                         Text(
-                          'Загрузка сообщений…',
+                          dialog.isCh
+                              ? 'Загрузка канала…'
+                              : 'Загрузка сообщений…',
                           style: TextStyle(color: p.text2, fontSize: 15),
                         ),
                       ],

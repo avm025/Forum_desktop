@@ -7,11 +7,13 @@ import 'package:provider/provider.dart';
 import '../models/user_profile.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../widgets/bottom_nav_bar.dart';
 import '../widgets/cached_forum_image.dart';
 import '../widgets/profile_avatar_editor.dart';
 import 'appearance_screen.dart';
 import 'profile/devices_menu_screen.dart';
 import 'profile/edit_profile_screen.dart';
+import 'profile/notifications_sounds_screen.dart';
 import 'profile/profile_placeholder_screen.dart';
 import 'profile/qr_authorize_screen.dart';
 
@@ -26,7 +28,10 @@ enum _ProfileSection {
 
 /// Вкладка «Профиль» — слева меню, справа выбранный раздел.
 class ProfileScreen extends StatefulWidget {
-  const ProfileScreen({super.key});
+  /// В wide-режиме таббар снизу левой колонки (как у чатов).
+  final bool showNavInLeftPane;
+
+  const ProfileScreen({super.key, this.showNavInLeftPane = false});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
@@ -49,23 +54,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final width = MediaQuery.sizeOf(context).width;
     final split = width >= _splitBreakpoint;
 
+    final menu = SafeArea(
+      right: !split,
+      bottom: !widget.showNavInLeftPane,
+      child: _ProfileMenuPane(
+        selected: _section,
+        cardBg: cardBg,
+        separator: separator,
+        onSelect: (section) {
+          if (split) {
+            setState(() => _section = section);
+          } else {
+            _openSectionFullScreen(context, section);
+          }
+        },
+      ),
+    );
+
     final leftPane = ColoredBox(
       color: leftBg,
-      child: SafeArea(
-        right: !split,
-        child: _ProfileMenuPane(
-          selected: _section,
-          cardBg: cardBg,
-          separator: separator,
-          onSelect: (section) {
-            if (split) {
-              setState(() => _section = section);
-            } else {
-              _openSectionFullScreen(context, section);
-            }
-          },
-        ),
-      ),
+      child: widget.showNavInLeftPane
+          ? Column(
+              children: [
+                Expanded(child: menu),
+                const SafeArea(
+                  top: false,
+                  child: ForumBottomNav(),
+                ),
+              ],
+            )
+          : menu,
     );
 
     if (!split) {
@@ -111,10 +129,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           embedded: true,
         );
       case _ProfileSection.notifications:
-        return const ProfilePlaceholderScreen(
-          title: 'Уведомления и звуки',
-          embedded: true,
-        );
+        return const NotificationsSoundsScreen(embedded: true);
       case _ProfileSection.language:
         return const ProfilePlaceholderScreen(
           title: 'Язык',
@@ -138,7 +153,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       case _ProfileSection.privacy:
         page = const ProfilePlaceholderScreen(title: 'Конфиденциальность');
       case _ProfileSection.notifications:
-        page = const ProfilePlaceholderScreen(title: 'Уведомления и звуки');
+        page = const NotificationsSoundsScreen();
       case _ProfileSection.language:
         page = const ProfilePlaceholderScreen(title: 'Язык');
       case _ProfileSection.devices:

@@ -10,6 +10,9 @@ class DeviceSession {
   final String? dttmcr;
   final bool online;
 
+  /// Сырые `msg_*` флаги устройства (если сервер их отдаёт в device_list).
+  final Map<String, dynamic> notificationFlags;
+
   const DeviceSession({
     required this.uid,
     this.os = '',
@@ -20,11 +23,25 @@ class DeviceSession {
     this.dttmup,
     this.dttmcr,
     this.online = false,
+    this.notificationFlags = const {},
   });
 
   static DeviceSession? fromJson(Map<String, dynamic> json) {
     final uid = json['uid']?.toString() ?? '';
     if (uid.isEmpty) return null;
+    final flags = <String, dynamic>{};
+    for (final key in const [
+      'msg_sound',
+      'msg_push_on',
+      'msg_sound_on',
+      'msg_vibro_on',
+      'msg_count_on',
+      'msg_name_on',
+      'msg_new_usr_on',
+      'msg_pop_ups_on',
+    ]) {
+      if (json.containsKey(key)) flags[key] = json[key];
+    }
     return DeviceSession(
       uid: uid,
       os: json['os']?.toString() ?? '',
@@ -35,6 +52,7 @@ class DeviceSession {
       dttmup: json['dttmup']?.toString(),
       dttmcr: json['dttmcr']?.toString(),
       online: json['online'] == true,
+      notificationFlags: flags,
     );
   }
 

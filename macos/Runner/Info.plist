@@ -31,8 +31,8 @@
 	<key>NSContactsUsageDescription</key>
 	<string>Forum использует контакты для синхронизации списка диалогов с сервером.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Forum нужен микрофон для аудио- и видеозвонков.</string>
+	<string>Forum нужен микрофон для голосовых сообщений, видеосообщений и звонков.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Forum нужна камера для видеозвонков.</string>
+	<string>Forum нужна камера для видеосообщений и видеозвонков.</string>
 </dict>
 </plist>

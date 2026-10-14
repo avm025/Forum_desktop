@@ -94,9 +94,26 @@ class VoicePlayer {
     final isCurrent = _currentId == id && player != null;
     if (isCurrent) {
       if (state.value.playing) {
+        // Снимок до pause: positionStream на macOS иногда шлёт 0 после
+        // первой паузы — без этого прогресс волны пропадает.
+        final snap = _snapshotProgress(player);
         await player.pause();
-        _emit(messageId: id, playing: false);
+        final after = _snapshotProgress(player);
+        final use = after.position > Duration.zero ? after : snap;
+        _emit(
+          messageId: id,
+          playing: false,
+          loading: false,
+          progress: use.progress,
+          position: use.position,
+          duration: use.duration,
+          speed: _speed,
+        );
       } else {
+        // После конца трека позиция уже 0 — просто play.
+        if (player.processingState == ProcessingState.completed) {
+          await player.seek(Duration.zero);
+        }
         await player.setSpeed(_speed);
         await player.play();
         _emit(messageId: id, playing: true, speed: _speed);
@@ -105,6 +122,18 @@ class VoicePlayer {
     }
 
     await _start(message, speed: _speed);
+  }
+
+  static ({Duration position, Duration duration, double progress})
+      _snapshotProgress(AudioPlayer player) {
+    final pos = player.position;
+    final total = player.duration ?? state.value.duration;
+    var progress = state.value.progress;
+    if (total.inMilliseconds > 0) {
+      progress =
+          (pos.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0);
+    }
+    return (position: pos, duration: total, progress: progress);
   }
 
   static String _playbackId(MessageViewModel message) {
@@ -172,7 +201,7 @@ class VoicePlayer {
       _playerStateSub = player.playerStateStream.listen(_onPlayerState);
       _completedSub = player.processingStateStream.listen((ps) {
         if (ps == ProcessingState.completed) {
-          unawaited(stop());
+          unawaited(_onCompleted());
         }
       });
 
@@ -196,27 +225,90 @@ class VoicePlayer {
   static void _onPosition(Duration pos) {
     final player = _player;
     if (player == null) return;
+    // На паузе игнор ложного нуля из positionStream (часто после 1-й паузы).
+    if (!player.playing &&
+        pos <= Duration.zero &&
+        state.value.progress > 0 &&
+        state.value.position > Duration.zero) {
+      return;
+    }
     final total = player.duration ?? state.value.duration;
     var progress = 0.0;
     if (total.inMilliseconds > 0) {
       progress = (pos.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0);
+    } else if (!player.playing) {
+      progress = state.value.progress;
     }
     _emit(
       messageId: _currentId,
       playing: player.playing,
       loading: false,
       progress: progress,
-      position: pos,
+      position: pos > Duration.zero || player.playing ? pos : state.value.position,
       duration: total,
       speed: _speed,
     );
   }
 
   static void _onPlayerState(PlayerState ps) {
+    if (ps.processingState == ProcessingState.completed) {
+      // Кнопку play/pause обработает _onCompleted; не оставляем playing:true.
+      return;
+    }
+    final player = _player;
+    if (player == null) {
+      _emit(
+        messageId: _currentId,
+        playing: ps.playing,
+        loading: false,
+        speed: _speed,
+      );
+      return;
+    }
+    // Не затирать прогресс при pause без позиции.
+    if (!ps.playing) {
+      final snap = _snapshotProgress(player);
+      final progress = snap.progress > 0 ? snap.progress : state.value.progress;
+      final position =
+          snap.position > Duration.zero ? snap.position : state.value.position;
+      _emit(
+        messageId: _currentId,
+        playing: false,
+        loading: false,
+        progress: progress,
+        position: position,
+        duration: snap.duration.inMilliseconds > 0
+            ? snap.duration
+            : state.value.duration,
+        speed: _speed,
+      );
+      return;
+    }
     _emit(
       messageId: _currentId,
-      playing: ps.playing,
+      playing: true,
       loading: false,
+      speed: _speed,
+    );
+  }
+
+  /// Конец трека: сброс на начало, кнопка play (без dispose).
+  static Future<void> _onCompleted() async {
+    final player = _player;
+    final id = _currentId;
+    if (player == null || id == null) return;
+    final total = player.duration ?? state.value.duration;
+    try {
+      await player.seek(Duration.zero);
+      await player.pause();
+    } catch (_) {}
+    _emit(
+      messageId: id,
+      playing: false,
+      loading: false,
+      progress: 0,
+      position: Duration.zero,
+      duration: total,
       speed: _speed,
     );
   }

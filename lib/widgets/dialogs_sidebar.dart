@@ -43,6 +43,13 @@ class DialogsSidebar extends StatelessWidget {
             const FilterTabs(),
             const SizedBox(height: 4),
             Divider(height: 1, color: p.border1),
+            if ((state.dialogsBootstrapping || state.channelsHydrating) &&
+                dialogs.isNotEmpty)
+              LinearProgressIndicator(
+                minHeight: 2,
+                color: p.purple,
+                backgroundColor: p.purple.withValues(alpha: 0.12),
+              ),
             Expanded(
               child: _buildBody(context, state, p, dialogs),
             ),
@@ -59,7 +66,12 @@ class DialogsSidebar extends StatelessWidget {
     ForumPalette p,
     List<DialogsListViewModel> dialogs,
   ) {
-    if (state.isLoading && state.connectionStatus != ConnectionStatus.connected) {
+    final bootstrapping =
+        state.dialogsBootstrapping || state.channelsHydrating;
+    final connecting = state.isLoading &&
+        state.connectionStatus != ConnectionStatus.connected;
+
+    if ((bootstrapping || connecting) && dialogs.isEmpty) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -67,7 +79,9 @@ class DialogsSidebar extends StatelessWidget {
             CircularProgressIndicator(color: p.purple),
             const SizedBox(height: 16),
             Text(
-              'Подключение к серверу…',
+              connecting && !bootstrapping
+                  ? 'Подключение к серверу…'
+                  : 'Загрузка чатов и каналов…',
               style: TextStyle(color: p.text2, fontSize: 15),
             ),
           ],

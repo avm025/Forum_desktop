@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../api/api_config.dart';
 import '../theme/app_colors.dart';
+import 'telegram_media_loader.dart';
 
 /// Изображение с дисковым кэшем (cached_network_image).
 /// Если файл уже в кэше — повторно с сервера не загружается.
@@ -16,6 +17,8 @@ class CachedForumImage extends StatelessWidget {
   final bool blankWhileLoading;
   /// Свой placeholder (например, уже готовый thumbnail).
   final Widget? placeholder;
+  /// Круговой loader как в Telegram поверх placeholder / затемнения.
+  final bool telegramLoader;
   final Duration fadeInDuration;
   final Duration fadeOutDuration;
 
@@ -28,6 +31,7 @@ class CachedForumImage extends StatelessWidget {
     this.borderRadius,
     this.blankWhileLoading = false,
     this.placeholder,
+    this.telegramLoader = false,
     this.fadeInDuration = const Duration(milliseconds: 500),
     this.fadeOutDuration = const Duration(milliseconds: 1000),
   });
@@ -35,7 +39,7 @@ class CachedForumImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (url.isEmpty) {
-      return _loadingPlaceholder(width, height);
+      return _loadingPlaceholder(width, height, progress: null);
     }
 
     Widget image = CachedNetworkImage(
@@ -46,7 +50,16 @@ class CachedForumImage extends StatelessWidget {
       fit: fit,
       fadeInDuration: fadeInDuration,
       fadeOutDuration: fadeOutDuration,
-      placeholder: (_, __) => _loadingPlaceholder(width, height),
+      progressIndicatorBuilder: telegramLoader
+          ? (context, _, progress) => _loadingPlaceholder(
+                width,
+                height,
+                progress: progress.progress,
+              )
+          : null,
+      placeholder: telegramLoader
+          ? null
+          : (_, __) => _loadingPlaceholder(width, height, progress: null),
       errorWidget: (_, __, ___) => _errorPlaceholder(width, height),
     );
 
@@ -56,7 +69,21 @@ class CachedForumImage extends StatelessWidget {
     return image;
   }
 
-  Widget _loadingPlaceholder(double? w, double? h) {
+  Widget _loadingPlaceholder(
+    double? w,
+    double? h, {
+    required double? progress,
+  }) {
+    if (telegramLoader) {
+      return SizedBox(
+        width: w,
+        height: h,
+        child: TelegramMediaLoadingStack(
+          background: placeholder,
+          progress: progress,
+        ),
+      );
+    }
     if (placeholder != null) {
       return SizedBox(width: w, height: h, child: placeholder);
     }

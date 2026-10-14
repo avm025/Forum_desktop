@@ -6,6 +6,7 @@ import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 
 import '../state/app_state.dart';
 import '../utils/chat_file_dnd.dart';
+import 'attach_composer_sheet.dart';
 
 /// Какой чат сейчас под курсором при DnD файлов (не больше одного).
 class DialogDropHover {
@@ -28,7 +29,7 @@ class DialogDropHover {
 /// Drop на строку чата в списке:
 /// — подсветка только этого чата (предыдущее выделение снимается);
 /// — через 1 с удержания открывается диалог;
-/// — drop прикрепляет файлы к полю ввода (отправка — по Send).
+/// — drop открывает окно подписи (как Telegram).
 class DialogDropTarget extends StatefulWidget {
   final String dlgId;
   final Widget child;
@@ -127,17 +128,21 @@ class _DialogDropTargetState extends State<DialogDropTarget> {
         try {
           final files = await ChatFileDnd.readDroppedFiles(event.session);
           if (!mounted || files.isEmpty) return;
-          await appState.stageDroppedAttachments(
-            files,
-            dlgId: widget.dlgId,
-          );
+          if (!AppState.sameDlgId(appState.selectedId, widget.dlgId)) {
+            await appState.selectDialog(widget.dlgId);
+          }
+          if (!mounted) return;
+          if (appState.selectedDialog == null) return;
+          if (mounted) setState(() => _busy = false);
+          AttachComposerSheet.showLater(context, initialFiles: files);
         } catch (e) {
           if (!mounted) return;
           messenger?.showSnackBar(
             SnackBar(content: Text('Не удалось прикрепить файлы: $e')),
           );
-        } finally {
           if (mounted) setState(() => _busy = false);
+        } finally {
+          if (mounted && _busy) setState(() => _busy = false);
         }
       },
       child: widget.child,

@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:record/record.dart';
 
 import '../models/media_file.dart';
 import '../models/message_view_model.dart';
@@ -19,8 +22,12 @@ import '../utils/file_kind.dart';
 import '../utils/media_message_layout.dart';
 import '../utils/mention_markup.dart';
 import '../utils/utf16.dart';
+import '../utils/voice_histogram.dart';
+import 'attach_composer_sheet.dart';
 import 'mention_picker.dart';
 import 'message_composer_reply.dart';
+import 'telegram_emoji_overlay.dart';
+import 'video_note_recorder.dart';
 
 /// Поле ввода сообщения: скрепка, текст, кнопка отправки/микрофон.
 class MessageInput extends StatefulWidget {
@@ -30,7 +37,8 @@ class MessageInput extends StatefulWidget {
   State<MessageInput> createState() => _MessageInputState();
 }
 
-class _MessageInputState extends State<MessageInput> {
+class _MessageInputState extends State<MessageInput>
+    with TelegramEmojiOverlayHost {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   /// Отдельно от setState — смена иконки send/mic не трогает TextField.
@@ -51,6 +59,34 @@ class _MessageInputState extends State<MessageInput> {
   String? _lastReportedText;
   bool _mentionSyncScheduled = false;
   bool _membersFetchQueued = false;
+
+  bool _recording = false;
+  bool _recordBusy = false;
+  DateTime? _recordStartedAt;
+  Timer? _recordTick;
+  int _recordElapsed = 0;
+  final List<int> _recordLevels = [];
+  StreamSubscription<Amplitude>? _ampSub;
+  final AudioRecorder _recorder = AudioRecorder();
+  String? _recordPath;
+
+  /// Как в Telegram: одна кнопка справа — send ↔ mic ↔ video.
+  /// `true` = видеосообщение, `false` = голосовое (пока поле пустое).
+  bool _recordVideoMode = false;
+  final GlobalKey _recordBtnKey = GlobalKey();
+  OverlayEntry? _recordTipOverlay;
+  Timer? _recordTipTimer;
+  final ValueNotifier<String> _recordTipText = ValueNotifier<String>('');
+  double _recordTipLeft = 0;
+  double _recordTipTop = 0;
+  double _recordTipArrowX = 0;
+
+  /// +20% к иконкам смайла / видео / голоса.
+  static const _emojiIconSize = 26.4; // 22 * 1.2
+  static const _iconLg = 24.0; // 20 * 1.2
+  static const _actionSize = 48.0; // 40 * 1.2
+  /// Небольшой зазор после placeholder «Сообщение...».
+  static const _hintGap = 12.0;
 
   @override
   void initState() {
@@ -88,12 +124,198 @@ class _MessageInputState extends State<MessageInput> {
       CursorPosition.onClipboardImage = null;
     }
     unawaited(CursorPosition.setImagePasteIntercept(false));
+    disposeEmojiOverlay();
+    _hideRecordTip();
+    _recordTipText.dispose();
+    _recordTick?.cancel();
+    unawaited(_ampSub?.cancel());
+    unawaited(_recorder.dispose());
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
     _hasText.dispose();
     _mentionStrip.dispose();
     super.dispose();
+  }
+
+  void _insertEmoji(String emoji) {
+    final text = _controller.text;
+    final sel = _controller.selection;
+    final start = sel.isValid ? sel.start : text.length;
+    final end = sel.isValid ? sel.end : text.length;
+    final next = text.replaceRange(start, end, emoji);
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: start + emoji.length),
+    );
+    _focusNode.requestFocus();
+  }
+
+  static double measureHintWidth(String hint, {double fontSize = 15}) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: hint,
+        style: TextStyle(fontSize: fontSize, height: 1.2),
+      ),
+      maxLines: 1,
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return painter.width;
+  }
+
+  Future<void> _startVoiceRecord() async {
+    if (_recording || _recordBusy) return;
+    _hideRecordTip();
+    setState(() => _recordBusy = true);
+    try {
+      final ok = await _recorder.hasPermission();
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Нет доступа к микрофону')),
+          );
+        }
+        return;
+      }
+      final dir = await getTemporaryDirectory();
+      final path =
+          '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+      _recordPath = path;
+      _recordLevels.clear();
+      _recordStartedAt = DateTime.now();
+      _recordElapsed = 0;
+      _recordTick?.cancel();
+      _recordTick = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted || _recordStartedAt == null) return;
+        setState(() {
+          _recordElapsed =
+              DateTime.now().difference(_recordStartedAt!).inSeconds;
+        });
+      });
+      await _ampSub?.cancel();
+      _ampSub = _recorder
+          .onAmplitudeChanged(const Duration(milliseconds: 80))
+          .listen((amp) {
+        // dBFS ≈ −160…0 → уровень 0…15
+        final db = amp.current;
+        final norm = ((db + 45) / 45).clamp(0.0, 1.0);
+        final level = (norm * VoiceHistogram.maxLevel).round();
+        _recordLevels.add(level);
+        if (_recordLevels.length > 400) {
+          _recordLevels.removeRange(0, _recordLevels.length - 400);
+        }
+        if (mounted) setState(() {});
+      });
+      if (!mounted) return;
+      hideEmojiOverlay();
+      if (!mounted) return;
+      setState(() {
+        _recording = true;
+      });
+    } catch (e) {
+      ApiLogger.instance.logEvent('VOICE', 'start: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось начать запись: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _recordBusy = false);
+    }
+  }
+
+  Future<void> _cancelVoiceRecord() async {
+    _recordTick?.cancel();
+    await _ampSub?.cancel();
+    _ampSub = null;
+    try {
+      await _recorder.cancel();
+    } catch (_) {}
+    final path = _recordPath;
+    _recordPath = null;
+    if (path != null) {
+      try {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      _recording = false;
+      _recordElapsed = 0;
+      _recordLevels.clear();
+    });
+  }
+
+  Future<void> _finishVoiceRecord({required bool send}) async {
+    if (!_recording || _recordBusy) return;
+    setState(() => _recordBusy = true);
+    _recordTick?.cancel();
+    await _ampSub?.cancel();
+    _ampSub = null;
+    try {
+      final path = await _recorder.stop() ?? _recordPath;
+      final started = _recordStartedAt;
+      final sec = started == null
+          ? _recordElapsed
+          : DateTime.now().difference(started).inSeconds;
+      _recordPath = null;
+      if (!mounted) return;
+      setState(() {
+        _recording = false;
+        _recordElapsed = 0;
+      });
+      if (!send || path == null || sec < 1) {
+        if (path != null) {
+          try {
+            final f = File(path);
+            if (await f.exists()) await f.delete();
+          } catch (_) {}
+        }
+        return;
+      }
+      final hist = _recordLevels.isEmpty
+          ? VoiceHistogram.placeholder(durationSec: sec.clamp(1, 3600))
+          : VoiceHistogram.downsample(
+              List<int>.from(_recordLevels),
+              math.min(64, math.max(16, sec * 4)),
+            );
+      _recordLevels.clear();
+      await context.read<AppState>().sendVoiceMessage(
+            localPath: path,
+            durationSec: sec.clamp(1, 3600),
+            histogram: hist,
+          );
+    } catch (e) {
+      ApiLogger.instance.logEvent('VOICE', 'stop: $e');
+    } finally {
+      if (mounted) setState(() => _recordBusy = false);
+    }
+  }
+
+  Future<void> _openVideoNote() async {
+    hideEmojiOverlay();
+    final result = await VideoNoteRecorder.show(context);
+    if (result == null || !mounted) return;
+    await context.read<AppState>().sendVideoNote(
+          localPath: result.path,
+          durationSec: result.durationSec,
+        );
+  }
+
+  String _fmtRec(int sec) {
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
@@ -568,7 +790,8 @@ class _MessageInputState extends State<MessageInput> {
         .toList();
 
     if (!mounted) return;
-    context.read<AppState>().addComposerAttachments(files);
+    // После закрытия file picker — на следующий кадр, без вложенного await.
+    AttachComposerSheet.showLater(context, initialFiles: files);
   }
 
   Future<void> _pickVideos() async {
@@ -591,7 +814,7 @@ class _MessageInputState extends State<MessageInput> {
         .toList();
 
     if (!mounted) return;
-    context.read<AppState>().addComposerAttachments(files);
+    AttachComposerSheet.showLater(context, initialFiles: files);
   }
 
   Future<void> _pickFile() async {
@@ -614,7 +837,7 @@ class _MessageInputState extends State<MessageInput> {
         .toList();
 
     if (!mounted) return;
-    context.read<AppState>().addComposerAttachments(files);
+    AttachComposerSheet.showLater(context, initialFiles: files);
   }
 
   Widget _pendingStrip(AppState state, ForumPalette p) {
@@ -737,86 +960,444 @@ class _MessageInputState extends State<MessageInput> {
               },
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  InkWell(
-                    onTap: editing != null ? null : _openAttachMenu,
-                    customBorder: const CircleBorder(),
-                    child: Padding(
-                      padding: const EdgeInsets.all(2),
-                      child: Icon(
-                        Icons.attach_file,
-                        color: editing != null
-                            ? p.text2.withValues(alpha: 0.4)
-                            : p.text2,
-                        size: 24,
-                      ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: _recording
+                  ? _buildRecordingBar(p)
+                  : _buildComposerBar(
+                      p,
+                      editing: editing != null,
+                      replyTo: replyTo != null,
+                      hasPending: hasPending,
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 120),
-                      child: TextField(
-                        controller: _controller,
-                        focusNode: _focusNode,
-                        inputFormatters: const [Utf16SanitizingFormatter()],
-                        style: TextStyle(color: p.text1, fontSize: 15),
-                        minLines: 1,
-                        maxLines: 5,
-                        textInputAction: TextInputAction.newline,
-                        showCursor: true,
-                        cursorWidth: 2,
-                        cursorColor: p.purple,
-                        enableInteractiveSelection: true,
-                        decoration: InputDecoration(
-                          isCollapsed: true,
-                          hintText: editing != null
-                              ? 'Изменить...'
-                              : (replyTo == null
-                                  ? 'Сообщение...'
-                                  : 'Ответ...'),
-                          hintStyle:
-                              TextStyle(color: p.text2, fontSize: 15),
-                          border: InputBorder.none,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  ValueListenableBuilder<bool>(
-                    valueListenable: _hasText,
-                    builder: (context, hasText, _) {
-                      final showSend =
-                          hasText || hasPending || editing != null;
-                      return GestureDetector(
-                        onTap: _send,
-                        child: Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: p.purple,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            showSend ? Icons.send_rounded : Icons.mic,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
             ),
           ],
         ),
       ),
     );
   }
+
+  Widget _buildRecordingBar(ForumPalette p) {
+    final levels = _recordLevels.isEmpty
+        ? List<int>.filled(24, 2)
+        : VoiceHistogram.downsample(_recordLevels, 40);
+    return Row(
+      children: [
+        IconButton(
+          tooltip: 'Отменить',
+          onPressed: _recordBusy ? null : _cancelVoiceRecord,
+          icon: Icon(Icons.close_rounded, color: p.text2),
+        ),
+        Container(
+          width: 10,
+          height: 10,
+          decoration: const BoxDecoration(
+            color: Colors.redAccent,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          _fmtRec(_recordElapsed),
+          style: TextStyle(
+            color: p.text1,
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+        const SizedBox(width: 12),
+        // Волна: max 168px, при узком чате сжимается (не пропадает и не
+        // ломает Row).
+        Flexible(
+          child: LayoutBuilder(
+            builder: (context, c) {
+              final w = c.maxWidth.clamp(32.0, 168.0);
+              return Align(
+                alignment: Alignment.centerLeft,
+                child: SizedBox(
+                  width: w,
+                  height: 28,
+                  child: CustomPaint(
+                    painter: _LiveWavePainter(
+                      levels: levels,
+                      color: p.purple,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(width: 8),
+        _RoundAction(
+          color: p.purple,
+          icon: Icons.send_rounded,
+          onTap: _recordBusy ? null : () => _finishVoiceRecord(send: true),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildComposerBar(
+    ForumPalette p, {
+    required bool editing,
+    required bool replyTo,
+    required bool hasPending,
+  }) {
+    final hint = editing
+        ? 'Изменить...'
+        : (replyTo ? 'Ответ...' : 'Сообщение...');
+    // Полный placeholder + небольшой зазор; поле не сжимается уже.
+    final hintMinW = measureHintWidth(hint) + _hintGap;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        _RoundAction(
+          color: p.bg2,
+          border: p.border1,
+          icon: Icons.attach_file,
+          iconColor: editing ? p.text2.withValues(alpha: 0.4) : p.text2,
+          onTap: editing ? null : _openAttachMenu,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Container(
+            constraints: BoxConstraints(
+              minHeight: 40,
+              maxHeight: 120,
+              // Текст поля + кнопка смайла внутри pill.
+              minWidth: hintMinW + 40 + 18,
+            ),
+            decoration: BoxDecoration(
+              color: p.bg3,
+              borderRadius: BorderRadius.circular(22),
+            ),
+            padding: const EdgeInsets.fromLTRB(14, 8, 4, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: hintMinW),
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      inputFormatters: const [Utf16SanitizingFormatter()],
+                      style: TextStyle(color: p.text1, fontSize: 15),
+                      minLines: 1,
+                      maxLines: 5,
+                      textInputAction: TextInputAction.newline,
+                      showCursor: true,
+                      cursorWidth: 2,
+                      cursorColor: p.purple,
+                      enableInteractiveSelection: true,
+                      decoration: InputDecoration(
+                        isCollapsed: true,
+                        hintText: hint,
+                        hintStyle: TextStyle(color: p.text2, fontSize: 15),
+                        hintMaxLines: 1,
+                        border: InputBorder.none,
+                      ),
+                    ),
+                  ),
+                ),
+                buildEmojiIconButton(
+                  palette: p,
+                  onEmoji: _insertEmoji,
+                  iconSize: _emojiIconSize,
+                  enabled: !editing,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        // Одна кнопка как в Telegram: отправка ↔ голос ↔ видео.
+        ValueListenableBuilder<bool>(
+          valueListenable: _hasText,
+          builder: (context, hasText, _) {
+            final showSend = hasText || hasPending || editing;
+            return AnimatedSwitcher(
+              duration: const Duration(milliseconds: 160),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, anim) {
+                return ScaleTransition(
+                  scale: anim,
+                  child: FadeTransition(opacity: anim, child: child),
+                );
+              },
+              child: showSend
+                  ? _RoundAction(
+                      key: const ValueKey('send'),
+                      color: p.purple,
+                      icon: Icons.send_rounded,
+                      iconSize: _iconLg,
+                      size: _actionSize,
+                      onTap: _send,
+                    )
+                  : _RoundAction(
+                      key: _recordBtnKey,
+                      color: p.bg2,
+                      border: p.border1,
+                      icon: _recordVideoMode
+                          ? Icons.videocam_rounded
+                          : Icons.mic_none_rounded,
+                      iconColor: p.text2,
+                      iconSize: _iconLg,
+                      size: _actionSize,
+                      // Короткий ЛКМ — смена mic ↔ video + чёрная подсказка.
+                      onTap: _onRecordModeTap,
+                      // Долгое нажатие — запись выбранного типа.
+                      onLongPress: () {
+                        _hideRecordTip();
+                        if (_recordVideoMode) {
+                          _openVideoNote();
+                        } else {
+                          _startVoiceRecord();
+                        }
+                      },
+                    ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  void _onRecordModeTap() {
+    setState(() => _recordVideoMode = !_recordVideoMode);
+    _showRecordTip();
+  }
+
+  void _hideRecordTip() {
+    _recordTipTimer?.cancel();
+    _recordTipTimer = null;
+    _recordTipOverlay?.remove();
+    _recordTipOverlay = null;
+  }
+
+  String get _recordTipMessage => _recordVideoMode
+      ? 'Удерживайте для записи видео.\nНажмите для переключения на голос'
+      : 'Удерживайте для записи голоса.\nНажмите для переключения на видео';
+
+  /// Чёрный пузырь как в Telegram. При повторном клике только меняем текст —
+  /// без remove/insert, иначе моргает.
+  void _showRecordTip() {
+    _recordTipText.value = _recordTipMessage;
+    _recordTipTimer?.cancel();
+    _recordTipTimer = Timer(const Duration(seconds: 3), _hideRecordTip);
+
+    if (_recordTipOverlay != null) {
+      _recordTipOverlay!.markNeedsBuild();
+      return;
+    }
+
+    final box = _recordBtnKey.currentContext?.findRenderObject() as RenderBox?;
+    final overlayState = Overlay.maybeOf(context, rootOverlay: true);
+    final overlayBox = overlayState?.context.findRenderObject() as RenderBox?;
+    if (box == null ||
+        !box.hasSize ||
+        overlayState == null ||
+        overlayBox == null ||
+        !overlayBox.hasSize) {
+      return;
+    }
+
+    final origin = box.localToGlobal(Offset.zero, ancestor: overlayBox);
+    final btnSize = box.size;
+
+    // Ширина под две полные строки (без переноса третьей).
+    const tipMaxW = 340.0;
+    const tipPad = 8.0;
+    const tipBlockH = 64.0;
+    const gapAboveIcon = 14.0;
+    var tipLeft = origin.dx + btnSize.width / 2 - tipMaxW / 2;
+    tipLeft = tipLeft.clamp(
+      tipPad,
+      (overlayBox.size.width - tipMaxW - tipPad)
+          .clamp(tipPad, overlayBox.size.width),
+    );
+    _recordTipLeft = tipLeft;
+    _recordTipTop = (origin.dy - tipBlockH - gapAboveIcon).clamp(
+      tipPad,
+      overlayBox.size.height,
+    );
+    _recordTipArrowX =
+        (origin.dx + btnSize.width / 2 - tipLeft).clamp(16.0, tipMaxW - 16);
+
+    _recordTipOverlay = OverlayEntry(
+      builder: (ctx) {
+        return Positioned(
+          left: _recordTipLeft,
+          top: _recordTipTop,
+          width: tipMaxW,
+          child: IgnorePointer(
+            child: ValueListenableBuilder<String>(
+              valueListenable: _recordTipText,
+              builder: (_, text, __) {
+                return _TelegramRecordTip(
+                  text: text,
+                  arrowCenterX: _recordTipArrowX,
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+    overlayState.insert(_recordTipOverlay!);
+  }
+}
+
+/// Подсказка записи в стиле Telegram Desktop (тёмный пузырь + стрелка вниз).
+class _TelegramRecordTip extends StatelessWidget {
+  final String text;
+  final double arrowCenterX;
+
+  const _TelegramRecordTip({
+    required this.text,
+    required this.arrowCenterX,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const bg = Color(0xE6282828);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Material(
+          color: bg,
+          elevation: 6,
+          shadowColor: Colors.black54,
+          borderRadius: BorderRadius.circular(10),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Text(
+              text,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              softWrap: true,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                height: 1.3,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+        SizedBox(
+          height: 7,
+          width: double.infinity,
+          child: CustomPaint(
+            painter: _TipArrowPainter(
+              color: bg,
+              tipX: arrowCenterX,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TipArrowPainter extends CustomPainter {
+  final Color color;
+  final double tipX;
+
+  _TipArrowPainter({required this.color, required this.tipX});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(tipX - 7, 0)
+      ..lineTo(tipX, size.height)
+      ..lineTo(tipX + 7, 0)
+      ..close();
+    canvas.drawPath(path, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(covariant _TipArrowPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.tipX != tipX;
+}
+
+class _RoundAction extends StatelessWidget {
+  final Color color;
+  final Color? border;
+  final IconData icon;
+  final Color iconColor;
+  final double iconSize;
+  final double size;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+
+  const _RoundAction({
+    super.key,
+    required this.color,
+    required this.icon,
+    this.border,
+    this.iconColor = Colors.white,
+    this.iconSize = 20,
+    this.size = 40,
+    this.onTap,
+    this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: color,
+      shape: CircleBorder(
+        side: border != null
+            ? BorderSide(color: border!)
+            : BorderSide.none,
+      ),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: Icon(icon, color: iconColor, size: iconSize),
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveWavePainter extends CustomPainter {
+  final List<int> levels;
+  final Color color;
+
+  _LiveWavePainter({required this.levels, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (levels.isEmpty) return;
+    final paint = Paint()
+      ..color = color
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 2.2;
+    final gap = size.width / levels.length;
+    final mid = size.height / 2;
+    for (var i = 0; i < levels.length; i++) {
+      final h = (levels[i] / VoiceHistogram.maxLevel) * (size.height * 0.9);
+      final x = i * gap + gap / 2;
+      canvas.drawLine(
+        Offset(x, mid - h / 2),
+        Offset(x, mid + h / 2),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _LiveWavePainter oldDelegate) =>
+      oldDelegate.levels != levels || oldDelegate.color != color;
 }
 
 /// Состояние полосы `@`-упоминаний вне setState композера.

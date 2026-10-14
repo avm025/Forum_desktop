@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Из Forum_ios GoogleService-Info.plist, BUNDLE_ID = forum.me (как у desktop).
+     GOOGLE_APP_ID — приложение Firebase с bundle forum.me в проекте forum-cfc88. -->
 <plist version="1.0">
 <dict>
 	<key>API_KEY</key>

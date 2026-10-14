@@ -119,6 +119,12 @@ class DialogTile extends StatelessWidget {
                             draft: draft,
                             draftLabelColor: draftLabelColor,
                             lastMsg: lastMsg,
+                            previewLoading:
+                                state.isDialogPreviewHydrating(dialog.id) ||
+                                    (selected &&
+                                        state.isDialogHistoryLoading(
+                                          dialog.id,
+                                        )),
                           ),
                         ],
                       ),
@@ -175,6 +181,7 @@ class DialogTile extends StatelessWidget {
     String? draft,
     required Color draftLabelColor,
     required String lastMsg,
+    bool previewLoading = false,
   }) {
     if (draft != null && draft.isNotEmpty) {
       return Text.rich(
@@ -199,7 +206,31 @@ class DialogTile extends StatelessWidget {
       );
     }
 
+    if (lastMsg.trim().isEmpty && previewLoading) {
+      return Row(
+        children: [
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.6,
+              color: color,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            'Загрузка…',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: color, fontSize: 14),
+          ),
+        ],
+      );
+    }
+
+    // В каналах не показываем имя канала второй строкой (это не «отправитель»).
     final showSender = dialog.isGrp &&
+        !dialog.isCh &&
         dialog.last_msg_fr_name.isNotEmpty &&
         dialog.last_msg_status < 0;
     if (showSender) {

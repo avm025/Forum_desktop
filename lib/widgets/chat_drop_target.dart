@@ -5,9 +5,10 @@ import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../utils/chat_file_dnd.dart';
+import 'attach_composer_sheet.dart';
 
 /// Приём файлов (в т.ч. группы) из Finder/Explorer в открытый диалог.
-/// Файлы попадают в поле ввода и отправляются только по кнопке Send.
+/// Открывает окно подписи (как Telegram), отправка — только по Send.
 class ChatDropTarget extends StatefulWidget {
   final Widget child;
 
@@ -65,14 +66,18 @@ class _ChatDropTargetState extends State<ChatDropTarget> {
         try {
           final files = await ChatFileDnd.readDroppedFiles(event.session);
           if (!mounted || files.isEmpty) return;
-          await appState.stageDroppedAttachments(files);
+          if (appState.selectedDialog == null) return;
+          // Сначала снимаем busy и отпускаем DnD, модалку — на следующий кадр.
+          if (mounted) setState(() => _busy = false);
+          AttachComposerSheet.showLater(context, initialFiles: files);
         } catch (e) {
           if (!mounted) return;
           messenger.showSnackBar(
             SnackBar(content: Text('Не удалось прикрепить файлы: $e')),
           );
-        } finally {
           if (mounted) setState(() => _busy = false);
+        } finally {
+          if (mounted && _busy) setState(() => _busy = false);
         }
       },
       child: Stack(
@@ -116,7 +121,7 @@ class _ChatDropTargetState extends State<ChatDropTarget> {
                         Expanded(
                           child: Text(
                             _busy
-                                ? 'Прикрепление…'
+                                ? 'Загрузка…'
                                 : 'Отпустите, чтобы прикрепить',
                             style: TextStyle(
                               color: p.text1,

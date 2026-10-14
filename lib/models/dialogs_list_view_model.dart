@@ -27,6 +27,8 @@ class DialogsListViewModel {
   final ChatType chatType;
   bool chatMuted;
   bool isGrp;
+  /// Канал (`dlg_list.is_ch == 1`), системная папка «Каналы».
+  bool isCh;
   String backgroundUrl;
   GroupAditionalInfoModel? groupAditionalInfo;
   int pin;
@@ -58,6 +60,7 @@ class DialogsListViewModel {
     this.chatType = ChatType.privateChat,
     this.chatMuted = false,
     this.isGrp = false,
+    this.isCh = false,
     this.backgroundUrl = '',
     this.groupAditionalInfo,
     this.pin = 0,
@@ -72,6 +75,7 @@ class DialogsListViewModel {
   bool get hasTagged => tagged > 0;
   bool get isPublicGroup =>
       isGrp && (groupAditionalInfo?.isPublic == true);
+  bool get isChannel => isCh;
 
   /// Плейсхолдер отсутствия диалога (`new_contact_dlg.md`).
   static bool isPlaceholderDlgId(String? id) {

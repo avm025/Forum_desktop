@@ -1,7 +1,7 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 
-/// Firebase-конфигурация для macOS (из GoogleService-Info.plist).
+/// Firebase из `macos/Runner/GoogleService-Info.plist` (проект forum-cfc88, bundle forum.me).
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) {
@@ -17,6 +17,7 @@ class DefaultFirebaseOptions {
     }
   }
 
+  /// Совпадает с GoogleService-Info.plist (BUNDLE_ID=forum.me).
   static const FirebaseOptions macos = FirebaseOptions(
     apiKey: 'AIzaSyAdSJpCmPRgEeLVgivRmt5eCo8Pw8A2MCY',
     appId: '1:899122665561:ios:00ea5a224b4ee071f4f948',

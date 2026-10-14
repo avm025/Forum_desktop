@@ -166,26 +166,49 @@ class OutgoingMessagePayload {
     required String dlgId,
     String? toId,
   }) {
+    // Подпись — как у media: desc, иначе body/text.
+    final cap = EmoticonReplacer.replace(
+      (message.desc.trim().isNotEmpty
+              ? message.desc
+              : (message.body.trim().isNotEmpty ? message.body : message.text))
+          .trim(),
+    );
+    final filesJson = message.files
+        .map(
+          (f) => UploadedFileInfo(
+            hash: f.hash,
+            fname: f.fname,
+            fdir: f.fdir,
+            kind: f.kind,
+            size: f.size,
+          ).toDocumentFileJson(
+            title: MediaDisplayName.forFile(f, dttmcr: message.dttmcr),
+            kind: f.kind,
+            width: f.width,
+            height: f.height,
+          ),
+        )
+        .toList();
+    final first = message.files.isNotEmpty ? message.files.first : null;
+    final firstTitle = first != null
+        ? MediaDisplayName.forFile(first, dttmcr: message.dttmcr)
+        : '';
+    final bodyMap = <String, dynamic>{
+      'desc': cap,
+      if (first != null) ...{
+        'kind': first.kind,
+        'title': firstTitle,
+        'size': first.size.toString(),
+        'fname': first.fname,
+        'fdir': first.fdir,
+      },
+      'files': filesJson,
+    };
     final payload = <String, dynamic>{
       'type': 'file',
       'hash': _hash(message),
       'ai': message.ai,
-      'body': jsonEncode({
-        'desc': message.desc.trim(),
-        'files': message.files
-            .map(
-              (f) => UploadedFileInfo(
-                hash: f.hash,
-                fname: f.fname,
-                fdir: f.fdir,
-                kind: f.kind,
-                size: f.size,
-              ).toDocumentFileJson(
-                title: MediaDisplayName.forFile(f, dttmcr: message.dttmcr),
-              ),
-            )
-            .toList(),
-      }),
+      'body': jsonEncode(bodyMap),
     };
     _applyTarget(payload, dlgId: dlgId, toId: toId);
     return payload;

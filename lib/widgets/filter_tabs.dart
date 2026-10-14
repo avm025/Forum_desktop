@@ -5,7 +5,7 @@ import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import 'folder_actions.dart';
 
-/// Ряд фильтров: Все / ИИ / Личное + папки диалогов с сервера.
+/// Ряд фильтров: Все / ИИ / Каналы / Личное + папки с сервера.
 class FilterTabs extends StatelessWidget {
   const FilterTabs({super.key});
 

@@ -12,6 +12,7 @@ import '../models/dlg_info_member.dart';
 import '../models/emoji_category.dart';
 import '../models/dialogs_list_view_model.dart';
 import '../models/msg_read_entry.dart';
+import '../models/notification_settings.dart';
 import '../models/user_profile.dart';
 import 'api_config.dart';
 import 'contacts_service.dart';
@@ -118,7 +119,11 @@ class ForumApiClient {
     );
   }
 
-  Future<UserProfile> login(String uid, {String fcmToken = ''}) async {
+  Future<UserProfile> login(
+    String uid, {
+    String fcmToken = '',
+    NotificationSettings? notifications,
+  }) async {
     final loginResp = await sendWs({
       'type': 'log_in',
       'data': {
@@ -138,17 +143,27 @@ class ForumApiClient {
         Map<String, dynamic>.from(loginResp['profile'] as Map? ?? {});
     await ForumCache.instance.saveProfile(profileMap);
 
-    await sendDeviceData(uid, fcmToken: fcmToken);
+    await sendDeviceData(uid, fcmToken: fcmToken, notifications: notifications);
 
     return UserProfile.fromJson(profileMap);
   }
 
-  /// WS `device` после успешного log_in (WS_DEVICE.md).
-  Future<void> sendDeviceData(String uid, {String fcmToken = ''}) async {
+  /// WS `device` после успешного log_in (api_forum_doc → device).
+  /// [force] — игнорировать throttle (например, появился FCM token).
+  Future<void> sendDeviceData(
+    String uid, {
+    String fcmToken = '',
+    NotificationSettings? notifications,
+    bool force = false,
+  }) async {
     if (!isConnected) return;
-    if (!await DeviceDataService.shouldSend()) return;
+    if (!force && !await DeviceDataService.shouldSend()) return;
 
-    final data = await DeviceDataService.buildPayload(uid, fcmToken: fcmToken);
+    final data = await DeviceDataService.buildPayload(
+      uid,
+      fcmToken: fcmToken,
+      notifications: notifications,
+    );
     final message = {'type': 'device', 'data': data};
 
     final channel = _channel;
@@ -157,6 +172,16 @@ class ForumApiClient {
     ApiLogger.instance.logWsSend('device', message);
     channel.sink.add(jsonEncode(message));
     await DeviceDataService.markSent();
+  }
+
+  /// Точечное обновление `msg_*` на устройстве (без throttle регистрации).
+  Future<void> sendDeviceUpdate(Map<String, dynamic> fields) async {
+    if (!isConnected) return;
+    final channel = _channel;
+    if (channel == null) return;
+    final message = {'type': 'device', 'data': fields};
+    ApiLogger.instance.logWsSend('device', message);
+    channel.sink.add(jsonEncode(message));
   }
 
   Future<List<DialogsListViewModel>> fetchDialogs(
@@ -222,7 +247,7 @@ class ForumApiClient {
     final generation = ++_connectionGeneration;
     ApiLogger.instance.logEvent('WS', 'Подключение ${ApiConfig.wsHost}');
     try {
-      final channel = connectForumWebSocket(ApiConfig.wsUri);
+      final channel = await connectForumWebSocket(ApiConfig.wsUri);
       await awaitWebSocketReady(channel);
       if (generation != _connectionGeneration) {
         try {
@@ -267,9 +292,8 @@ class ForumApiClient {
     _subscription = null;
     _channel = null;
     await subscription?.cancel();
-    try {
-      await channel?.sink.close();
-    } catch (_) {}
+    // RST TCP — сервер сразу CONN offline и шлёт FCM (не ждёт sleep).
+    await forceCloseWebSocket(channel);
     _failAll(StateError('WebSocket отключён'));
     _suppressDisconnect = false;
   }

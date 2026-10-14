@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../calls/call_manager.dart';
 import '../calls/call_message_display.dart';
 import '../calls/call_models.dart';
@@ -43,24 +45,31 @@ import '../models/media_file.dart';
 import '../models/message_emoji_model.dart';
 import '../models/message_view_model.dart';
 import '../models/msg_read_entry.dart';
+import '../models/notification_settings.dart';
 import '../models/user_profile.dart';
 import '../services/appearance_prefs.dart';
 import '../services/api_logger.dart';
 import '../services/auth_session.dart';
+import '../services/dock_badge_service.dart';
 import '../services/dialog_local_prefs.dart';
 import '../services/firebase_service.dart';
 import '../services/forum_cache.dart';
+import '../services/desktop_notification_service.dart';
+import '../services/notification_settings_prefs.dart';
 import '../theme/app_theme.dart';
 import '../theme/appearance_resolver.dart';
 import '../utils/global_search.dart';
 import '../utils/chat_file_dnd.dart';
 import '../utils/emoticon_replacer.dart';
+import '../utils/file_kind.dart';
 import '../utils/folder_list_codec.dart';
 import '../utils/media_display_name.dart';
 import '../utils/media_message_layout.dart';
 import '../utils/media_preprocessor.dart';
 import '../utils/mention_markup.dart';
 import '../utils/reaction_utils.dart';
+import '../utils/voice_histogram.dart';
+import '../services/media_thumb_cache.dart';
 
 /// Статус подключения к серверу.
 enum ConnectionStatus {
@@ -71,25 +80,33 @@ enum ConnectionStatus {
 }
 
 /// Вкладки нижней навигации.
-enum BottomNavTab { chats, projects, tasks, newLog, profile }
+enum BottomNavTab { chats, projects, newLog, profile }
 
 /// Встроенные вкладки фильтра (не папки с сервера).
 class BuiltinTab {
   static const all = '__all__';
   static const archive = '__archive__';
   static const ai = '__ai__';
+  /// Каналы (`dlg_list.is_ch == 1`), после ИИ.
+  static const channels = '__channels__';
   static const personal = '__personal__';
 
   static const maxFolderNameLength = 24;
 
   static bool isBuiltin(String tabId) =>
-      tabId == all || tabId == archive || tabId == ai || tabId == personal;
+      tabId == all ||
+      tabId == archive ||
+      tabId == ai ||
+      tabId == channels ||
+      tabId == personal;
 
   /// ID для `dlg_grp_sort` (клиентские системные папки).
   static String? sortId(String tabId) {
     if (tabId == ai) return '2';
+    if (tabId == channels) return '4';
     if (tabId == personal) return '3';
     if (tabId == all) return null;
+    if (tabId == archive) return null;
     return tabId;
   }
 }
@@ -134,6 +151,55 @@ class AppState extends ChangeNotifier {
 
   AppearanceSettings _appearance = const AppearanceSettings();
   AppearanceSettings get appearance => _appearance;
+
+  NotificationSettings _notificationSettings = NotificationSettings.defaults;
+  NotificationSettings get notificationSettings => _notificationSettings;
+
+  /// Приложение на переднем плане (для «Показывать уведомления» когда активно).
+  bool _appInForeground = true;
+  bool get appInForeground => _appInForeground;
+
+  Timer? _dockBadgeDebounce;
+
+  void setAppInForeground(bool value) {
+    _appInForeground = value;
+  }
+
+  @override
+  void notifyListeners() {
+    super.notifyListeners();
+    _scheduleDockBadgeSync();
+  }
+
+  void _scheduleDockBadgeSync() {
+    _dockBadgeDebounce?.cancel();
+    _dockBadgeDebounce = Timer(const Duration(milliseconds: 50), () {
+      unawaited(_syncDockBadge());
+    });
+  }
+
+  /// Как Telegram / api docs `msg_count_on`: по умолчанию число чатов с unread.
+  int computeDockBadgeCount() {
+    final s = _notificationSettings;
+    if (!s.badgeEnabled) return 0;
+    var total = 0;
+    for (final d in _dialogs) {
+      if (d.unread <= 0) continue;
+      if (d.chatMuted) continue;
+      if (d.isCh && !s.badgeIncludeChannels) continue;
+      if (d.isGrp && !d.isCh && !s.badgeIncludeGroups) continue;
+      if (s.badgeCountMessages) {
+        total += d.unread;
+      } else {
+        total += 1;
+      }
+    }
+    return total;
+  }
+
+  Future<void> _syncDockBadge() async {
+    await DockBadgeService.instance.setCount(computeDockBadgeCount());
+  }
 
   AppearanceResolver get appearanceResolver =>
       AppearanceResolver(database: _database, settings: _appearance);
@@ -190,6 +256,9 @@ class AppState extends ChangeNotifier {
 
   final Map<String, int> _mutedUntil = {};
   final Set<String> _archivedIds = {};
+  /// Известные каналы (`is_ch=1`): dlg_list часто отдаёт `is_ch=0` или
+  /// вообще не включает только что вступивший канал.
+  final Set<String> _channelDlgIds = {};
   Timer? _muteExpiryTimer;
 
   /// Сообщения / msg_list для dlg_id, которых ещё нет в списке (новая группа).
@@ -243,6 +312,11 @@ class AppState extends ChangeNotifier {
   final Set<String> _messagesLoadedFor = {};
   final Map<String, bool> _msgHasMore = {};
   final Map<String, Future<void>> _messageLoadsInFlight = {};
+  /// Фоновая подгрузка превью last_msg в списке чатов.
+  bool _previewHydrateRunning = false;
+  final Set<String> _previewHydratingIds = {};
+  /// Уже пробовали сеть для превью (чтобы не крутить полоску на каждом dlg_list).
+  final Set<String> _previewHydrateTriedIds = {};
   /// Локально скрытые сообщения («удалить у себя» / оптимистичное удаление).
   final Map<String, Set<String>> _deletedMessageIds = {};
   final Map<String, ChatScrollAnchor> _chatScrollAnchors = {};
@@ -250,6 +324,14 @@ class AppState extends ChangeNotifier {
   int _loadGeneration = 0;
   bool _refreshing = false;
   bool get isRefreshing => _refreshing;
+
+  /// Первая загрузка списка чатов/каналов после входа (до ответа dlg_list).
+  bool _dialogsBootstrapping = false;
+  bool get dialogsBootstrapping => _dialogsBootstrapping;
+
+  /// Подтягивание «залипших» каналов через dlg_info (нет в dlg_list).
+  bool _channelsHydrating = false;
+  bool get channelsHydrating => _channelsHydrating;
 
   bool _profileAvatarUploading = false;
   bool get profileAvatarUploading => _profileAvatarUploading;
@@ -273,6 +355,13 @@ class AppState extends ChangeNotifier {
   bool get isLoading => _connectionStatus == ConnectionStatus.connecting;
   bool get messagesLoading => _messagesLoading;
   bool get messagesLoadingOlder => _messagesLoadingOlder;
+
+  /// Превью last_msg для этого чата сейчас подгружается в фоне.
+  bool isDialogPreviewHydrating(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    if (key.isEmpty) return false;
+    return _previewHydratingIds.any((id) => _sameDlgId(id, key));
+  }
 
   /// Непрочитанные упоминания открытого/любого чата (`msgs_usr`).
   List<String> taggedMsgIds(String? dlgId) {
@@ -554,6 +643,7 @@ class AppState extends ChangeNotifier {
       rethrow;
     }
 
+    _forgetChannelId(id);
     _suppressDlg(id);
     _removeDialogLocally(id);
   }
@@ -587,6 +677,7 @@ class AppState extends ChangeNotifier {
       rethrow;
     }
 
+    _forgetChannelId(id);
     _suppressDlg(id);
     _removeDialogLocally(id);
   }
@@ -615,13 +706,26 @@ class AppState extends ChangeNotifier {
     } else {
       joined.groupAditionalInfo = GroupAditionalInfoModel(isPublic: true);
     }
+    // dlg_join для канала отдаёт is_ch=1; dlg_list часто — 0 или без карточки.
+    if (joined.isCh) _rememberChannelId(id);
 
     _suppressedDlgIds.removeWhere((x) => _sameDlgId(x, id));
     _upsertDialog(joined);
     _bumpDialog(id);
     notifyListeners();
     await selectDialog(id);
-    unawaited(refreshDialogs());
+    // Пока открыт поиск, обычный refreshDialogs() no-op — канал пропадает.
+    await refreshDialogs(ignoreSearch: true);
+    if (!_dialogs.any((d) => _sameDlgId(d.id, id))) {
+      _upsertDialog(joined);
+    } else {
+      final card = _findDialog(id);
+      if (card != null && joined.isCh) {
+        card.isCh = true;
+        _rememberChannelId(id);
+      }
+    }
+    notifyListeners();
   }
 
   void _suppressDlg(String dlgId) {
@@ -1041,8 +1145,25 @@ class AppState extends ChangeNotifier {
     if (cachedAppearance != null) {
       _appearance = cachedAppearance;
     }
+    final cachedNotifications = await NotificationSettingsPrefs.load();
+    if (cachedNotifications != null) {
+      _notificationSettings = cachedNotifications;
+      // Один раз откатить ошибочную миграцию на «число сообщений».
+      final prefs = await SharedPreferences.getInstance();
+      const migrateKey = 'forum_badge_revert_chats_v1';
+      if (!(prefs.getBool(migrateKey) ?? false)) {
+        if (_notificationSettings.badgeCountMessages) {
+          _notificationSettings =
+              _notificationSettings.copyWith(badgeCountMessages: false);
+          unawaited(NotificationSettingsPrefs.save(_notificationSettings));
+        }
+        unawaited(prefs.setBool(migrateKey, true));
+      }
+    }
+    FirebaseService.instance.bindNotificationSettings(_notificationSettings);
     await _loadDialogLocalPrefs();
     await _loadDatabaseCatalogs();
+    await _setupDesktopNotifications();
 
     final token = await AuthSession.loadToken();
     ApiConfig.setSessionToken(token);
@@ -1054,6 +1175,38 @@ class AppState extends ChangeNotifier {
       return;
     }
     return _bootstrap();
+  }
+
+  Future<void> _setupDesktopNotifications() async {
+    final n = DesktopNotificationService.instance;
+    await n.initialize();
+    n.onOpenDialog = (dlgId) {
+      unawaited(selectDialog(dlgId));
+    };
+    n.onOpenIncomingCall = () {
+      // Оверлей уже слушает CallManager.incoming — достаточно активировать окно.
+    };
+    // Политика как Telegram Desktop / iMessage:
+    // приложение открыто → локальный баннер (не FCM);
+    // открытый чат + окно в фокусе → без баннера;
+    // другой чат / окно не в фокусе → баннер.
+    n.allowMessageBanner = (dlgId) {
+      final s = _notificationSettings;
+      if (!s.pushOn) return false;
+      if (!s.popUpsOn) return false;
+      if (!s.showWhenAppActive && _appInForeground) return false;
+      if (_sameDlgId(_selectedId, dlgId) && _appInForeground) return false;
+      final d = _findDialog(dlgId);
+      if (d != null && d.chatMuted) return false;
+      return true;
+    };
+    n.allowCallBanner = () {
+      final s = _notificationSettings;
+      if (!s.incomingCalls) return false;
+      if (!s.pushOn) return false;
+      if (!s.showWhenAppActive && _appInForeground) return false;
+      return true;
+    };
   }
 
   /// Страны для экрана телефона (`database.countries`).
@@ -1112,6 +1265,7 @@ class AppState extends ChangeNotifier {
       await DialogLocalPrefs.clear();
       _mutedUntil.clear();
       _archivedIds.clear();
+      _channelDlgIds.clear();
       _muteExpiryTimer?.cancel();
       _muteExpiryTimer = null;
       _stopDialogsLiveSync();
@@ -1119,6 +1273,7 @@ class AppState extends ChangeNotifier {
       _dialogs = [];
       _groups = [];
       _pendingUnknownDialogPushes.clear();
+      unawaited(DockBadgeService.instance.clear());
       _unknownDialogRefreshQueued.clear();
       _unknownDialogRefreshAttempts.clear();
       _unknownDialogRefreshInFlight = null;
@@ -1376,6 +1531,7 @@ class AppState extends ChangeNotifier {
   Future<void> _bootstrap() async {
     _connectionError = null;
     final hadCache = await _restoreFromCache();
+    _dialogsBootstrapping = true;
     if (hadCache) {
       _connectionStatus = ConnectionStatus.connected;
       notifyListeners();
@@ -1393,9 +1549,16 @@ class AppState extends ChangeNotifier {
       _profile = await _api.login(
         uid,
         fcmToken: FirebaseService.instance.fcmToken,
+        notifications: _notificationSettings,
       );
       _mergeServerAppearance(_profile!.appearance);
       unawaited(AppearancePrefs.save(_appearance));
+      FirebaseService.instance.bindNotificationSettings(_notificationSettings);
+      // Docs: token часто пустой на первом device — досылаем после login.
+      unawaited(FirebaseService.instance.onLoggedIn(
+        notifications: _notificationSettings,
+      ));
+      unawaited(_syncNotificationSettingsFromDevice());
 
       // Контакты не блокируют вход: диалог macOS может висеть бесконечно.
       final contacts = await ContactsService.loadContacts()
@@ -1410,6 +1573,11 @@ class AppState extends ChangeNotifier {
       _dialogs = _mergePreservingMessages(await dialogsFuture);
       _connectionStatus = ConnectionStatus.connected;
       _connectionError = null;
+      // Каналы вроде Подоляка/Онуфриенко часто нет в dlg_list (is_ch=0) —
+      // подтягиваем до снятия индикатора старта, сразу с превью.
+      await _hydrateMissingChannelCards();
+      await _hydrateEmptyDialogPreviews();
+      _dialogsBootstrapping = false;
       _ensureDefaultSelection();
       notifyListeners();
       _startDialogsLiveSync();
@@ -1440,6 +1608,7 @@ class AppState extends ChangeNotifier {
       }
       _connectionError = e.toString();
     } finally {
+      _dialogsBootstrapping = false;
       _refreshing = false;
       notifyListeners();
     }
@@ -1484,8 +1653,12 @@ class AppState extends ChangeNotifier {
       await _ensureDeletedMessageIdsLoaded(id);
       if (dialog.messages.isNotEmpty) {
         await preloadChatScrollAnchor(id);
+        if (dialog.last_msg.trim().isEmpty) {
+          _updateDialogPreview(dialog, dialog.messages.last);
+        }
       }
     }
+    unawaited(_hydrateEmptyDialogPreviews());
 
     return restored;
   }
@@ -1670,6 +1843,84 @@ class AppState extends ChangeNotifier {
     await AppearancePrefs.save(settings);
     notifyListeners();
     return null;
+  }
+
+  /// Сохранить настройки уведомлений: локально + WS `device` msg_*.
+  Future<String?> saveNotificationSettings(NotificationSettings settings) async {
+    _notificationSettings = settings;
+    FirebaseService.instance.bindNotificationSettings(settings);
+    notifyListeners();
+    await NotificationSettingsPrefs.save(settings);
+
+    if (_connectionStatus == ConnectionStatus.connected && _api.isConnected) {
+      try {
+        final uid = await currentDeviceUid();
+        final payload = {
+          'uid': uid,
+          ...settings.toDevicePayload(),
+        };
+        await _api.sendDeviceUpdate(payload);
+        // Полный device с token — сервер строит FCM по usr_device (api docs).
+        unawaited(
+          FirebaseService.instance.onLoggedIn(notifications: settings),
+        );
+      } on ForumApiException catch (e) {
+        return e.message;
+      } catch (e) {
+        return e.toString();
+      }
+    }
+    return null;
+  }
+
+  Future<void> resetNotificationSettings() async {
+    await saveNotificationSettings(NotificationSettings.defaults);
+  }
+
+  /// Подтянуть msg_* с сервера для текущего устройства (`device_list`).
+  Future<void> _syncNotificationSettingsFromDevice() async {
+    try {
+      final uid = await currentDeviceUid();
+      final devices = await _api.fetchDeviceList();
+      DeviceSession? mine;
+      for (final d in devices) {
+        if (d.uid == uid) {
+          mine = d;
+          break;
+        }
+      }
+      mine ??= devices.isNotEmpty ? devices.first : null;
+      if (mine == null || mine.notificationFlags.isEmpty) {
+        // Нет флагов на сервере — зарегистрируем ещё раз с локальными.
+        unawaited(
+          FirebaseService.instance.onLoggedIn(
+            notifications: _notificationSettings,
+          ),
+        );
+        return;
+      }
+      final before = _notificationSettings;
+      _notificationSettings =
+          _notificationSettings.mergeDeviceFlags(mine.notificationFlags);
+      // Если сервер выключил пуши (часто из-за пустого token раньше) —
+      // не глушим локальные баннеры по умолчанию: оставляем вкл. и досылаем.
+      if (before.pushOn && !_notificationSettings.pushOn) {
+        _notificationSettings = _notificationSettings.copyWith(pushOn: true);
+      }
+      if (before.popUpsOn && !_notificationSettings.popUpsOn) {
+        _notificationSettings = _notificationSettings.copyWith(popUpsOn: true);
+      }
+      await NotificationSettingsPrefs.save(_notificationSettings);
+      FirebaseService.instance.bindNotificationSettings(_notificationSettings);
+      notifyListeners();
+      unawaited(
+        FirebaseService.instance.onLoggedIn(
+          notifications: _notificationSettings,
+        ),
+      );
+    } catch (e) {
+      ApiLogger.instance.logEvent('DEVICE', 'notif sync failed: $e');
+    }
   }
 
   Future<String?> updateProfileAvatar({
@@ -1857,6 +2108,9 @@ class AppState extends ChangeNotifier {
         mapped.add(d);
       }
       _applyContactBookNames(mapped);
+      for (final d in mapped) {
+        if (d.isCh) _rememberChannelId(d.id);
+      }
       _dlgSearchQuery = query;
       _serverSearchDialogs = mapped;
       ApiLogger.instance.logEvent(
@@ -1913,6 +2167,7 @@ class AppState extends ChangeNotifier {
         tagged: dialog.tagged,
         chatType: dialog.chatType,
         isGrp: dialog.isGrp,
+        isCh: dialog.isCh,
         backgroundUrl: dialog.backgroundUrl,
         groupAditionalInfo: dialog.groupAditionalInfo,
         pin: dialog.pin,
@@ -1921,6 +2176,7 @@ class AppState extends ChangeNotifier {
         online: dialog.online,
         awaitingJoin: dialog.isGrp,
       );
+      if (card.isCh) _rememberChannelId(id);
       _upsertDialog(card);
       notifyListeners();
     }
@@ -2196,13 +2452,14 @@ class AppState extends ChangeNotifier {
     await selectDialog(dlgId, closeGlobalSearch: false);
   }
 
-  /// Вкладки: Все, ИИ, Личное + папки с сервера.
+  /// Вкладки: Все, ИИ, Каналы, Личное + папки с сервера.
   List<({String id, String label})> get tabs {
     final items = <({String id, String label})>[
       (id: BuiltinTab.all, label: 'Все'),
       if (_archivedIds.isNotEmpty)
         (id: BuiltinTab.archive, label: 'Архив'),
       (id: BuiltinTab.ai, label: 'ИИ'),
+      (id: BuiltinTab.channels, label: 'Каналы'),
       (id: BuiltinTab.personal, label: 'Личное'),
     ];
     for (final g in _groups) {
@@ -2216,6 +2473,7 @@ class AppState extends ChangeNotifier {
     return [
       (id: BuiltinTab.all, label: 'Все', canReorder: false),
       (id: BuiltinTab.ai, label: 'ИИ', canReorder: false),
+      (id: BuiltinTab.channels, label: 'Каналы', canReorder: false),
       (id: BuiltinTab.personal, label: 'Личное', canReorder: false),
       ..._groups.map(
         (g) => (id: g.id, label: g.name.trim(), canReorder: true),
@@ -2326,14 +2584,19 @@ class AppState extends ChangeNotifier {
   }
 
   /// Перезагрузить список диалогов с сервера (после создания группы и т.п.).
-  Future<void> refreshDialogs() async {
+  Future<void> refreshDialogs({bool ignoreSearch = false}) async {
     if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
       return;
     }
     final existing = _refreshDialogsInFlight;
-    if (existing != null) return existing;
+    if (existing != null) {
+      await existing;
+      if (!ignoreSearch) return;
+      // После join при открытом поиске — ещё один проход, иначе канал не
+      // попадает в dlg_list / sticky-merge.
+    }
 
-    final future = _refreshDialogsBody();
+    final future = _refreshDialogsBody(ignoreSearch: ignoreSearch);
     _refreshDialogsInFlight = future;
     try {
       await future;
@@ -2344,9 +2607,10 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> _refreshDialogsBody() async {
-    // Пока открыт поиск — не пересобираем список (скачет выделение).
-    if (_search.trim().isNotEmpty) return;
+  Future<void> _refreshDialogsBody({bool ignoreSearch = false}) async {
+    // Пока открыт поиск — не пересобираем список (скачет выделение),
+    // кроме явного ignoreSearch (после dlg_join).
+    if (!ignoreSearch && _search.trim().isNotEmpty) return;
     try {
       final beforeIds = <String>{
         for (final d in _dialogs)
@@ -2366,7 +2630,13 @@ class AppState extends ChangeNotifier {
       _suppressedDlgIds.removeWhere(
         (id) => !incoming.any((d) => _sameDlgId(d.id, id)),
       );
+      final serverCh = filtered.where((d) => d.isCh).length;
+      ApiLogger.instance.logEvent(
+        'DLG_LIST',
+        '${filtered.length} чатов, is_ch=$serverCh, knownChannels=${_channelDlgIds.length}',
+      );
       _dialogs = _mergePreservingMessages(filtered);
+      await _hydrateMissingChannelCards();
       _ensureDefaultSelection();
 
       final added = <String>[];
@@ -2384,6 +2654,7 @@ class AppState extends ChangeNotifier {
         );
       }
       notifyListeners();
+      // Превью не гидратируем на каждом poll dlg_list — иначе вечная полоска.
     } on ForumApiException {
       // ignore — группа уже создана на сервере
     } catch (_) {
@@ -2392,7 +2663,69 @@ class AppState extends ChangeNotifier {
   }
 
   /// Фокус окна / resume — сразу подтянуть список (новые группы).
+  /// После hide/sleep/quit — не поднимать WS обратно, пока не wake.
+  bool _holdOfflineForPush = false;
+
+  /// Закрыть WS (выход / sleep / hide окна), чтобы сервер сразу слал FCM,
+  /// а не ждал TCP-таймаут или пробуждение.
+  Future<void> disconnectRealtimeForPush(String reason) async {
+    _holdOfflineForPush = true;
+    final wasConnected = _api.isConnected;
+    // Сначала сокет — логи/flush не должны задерживать offline для FCM.
+    try {
+      if (wasConnected) {
+        await _api.disconnect();
+        _connectionStatus = ConnectionStatus.idle;
+      }
+      await CallManager.instance.shutdown();
+    } catch (e) {
+      ApiLogger.instance.logEvent('WS', 'lifecycle $reason error: $e');
+    }
+    ApiLogger.instance.logEvent(
+      'WS',
+      wasConnected
+          ? 'disconnect ($reason) → offline для FCM'
+          : 'lifecycle $reason: already offline',
+    );
+    try {
+      await ApiLogger.instance.flushNow();
+    } catch (_) {}
+  }
+
+  Future<void> prepareForTerminate() => disconnectRealtimeForPush('terminate');
+
+  Future<void> prepareForSleep() => disconnectRealtimeForPush('sleep');
+
+  /// После sleep / обрыва — снова WS + login.
+  Future<void> prepareForWake() async {
+    _holdOfflineForPush = false;
+    if (_profile == null) return;
+    if (_api.isConnected) {
+      unawaited(refreshDialogs());
+      return;
+    }
+    ApiLogger.instance.logEvent('WS', 'wake → reconnect');
+    await retryConnection();
+  }
+
+  /// Крестик → Dock: WS живой, баннеры как при потере фокуса.
+  void onWindowHiddenToDock() {
+    setAppInForeground(false);
+    ApiLogger.instance.logEvent('WS', 'window hidden → Dock (WS kept for banners)');
+  }
+
+  /// Клик по иконке в Dock: окно снова на экране.
+  void onWindowShownFromDock() {
+    setAppInForeground(true);
+    onAppResumed();
+  }
+
   void onAppResumed() {
+    // После disconnect / обрыва — поднять WS снова.
+    if (_profile != null && !_api.isConnected) {
+      unawaited(prepareForWake());
+      return;
+    }
     if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
       return;
     }
@@ -2497,7 +2830,7 @@ class AppState extends ChangeNotifier {
 
   void _applyFolderSortOrder(List<String> arr) {
     final userIds = arr
-        .where((id) => id != '2' && id != '3')
+        .where((id) => id != '2' && id != '3' && id != '4')
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
@@ -2511,6 +2844,13 @@ class AppState extends ChangeNotifier {
   int? badgeForTab(String tabId) {
     if (tabId == BuiltinTab.ai) {
       final c = _dialogs.where((d) => (d.ai ?? 0) > 0).fold<int>(
+            0,
+            (a, d) => a + d.unread,
+          );
+      return c > 0 ? c : null;
+    }
+    if (tabId == BuiltinTab.channels) {
+      final c = _dialogs.where((d) => d.isCh).fold<int>(
             0,
             (a, d) => a + d.unread,
           );
@@ -2533,6 +2873,8 @@ class AppState extends ChangeNotifier {
 
     if (_activeTab == BuiltinTab.ai) {
       list = list.where((d) => (d.ai ?? 0) > 0);
+    } else if (_activeTab == BuiltinTab.channels) {
+      list = list.where((d) => d.isCh);
     } else if (_activeTab == BuiltinTab.personal) {
       list = list.where((d) => !d.isGrp);
     } else if (_activeTab != BuiltinTab.all &&
@@ -2758,6 +3100,10 @@ class AppState extends ChangeNotifier {
         _clearDialogTagged(previousId, prev);
       }
     }
+
+    if (id != null && id.trim().isNotEmpty) {
+      unawaited(DesktopNotificationService.instance.cancelDialog(id.trim()));
+    }
     _clearChatTypingIndicator();
     _composerText = '';
     _composerPendingAttachments.clear();
@@ -2875,13 +3221,16 @@ class AppState extends ChangeNotifier {
         force ? MsgListRequest.initial() : _buildMsgListRequest(dialog);
     final replace = !request.getNew;
 
-    // Пустой кэш / force — ждём хвост; при getNew ленту из кэша показываем сразу.
-    if (replace) {
-      _messagesLoading = true;
+    // Кэш уже есть — сразу показываем ленту (каналы: 100 media, иначе «висит»).
+    if (dialog != null && dialog.messages.isNotEmpty) {
+      _messagesLoadedFor.add(dlgId.trim());
       _messagesError = null;
       notifyListeners();
-    } else if (dialog != null && dialog.messages.isNotEmpty) {
-      _messagesLoadedFor.add(dlgId.trim());
+    }
+
+    // Спиннер только если показывать нечего.
+    if (replace && (dialog == null || dialog.messages.isEmpty)) {
+      _messagesLoading = true;
       _messagesError = null;
       notifyListeners();
     }
@@ -3718,6 +4067,7 @@ class AppState extends ChangeNotifier {
         dialog.unread++;
       }
       _registerIncomingTagged(dialog, dlgId, message);
+      _maybeNotifyIncomingMessage(dialog, dlgId, message);
       notifyListeners();
       return;
     }
@@ -3752,7 +4102,45 @@ class AppState extends ChangeNotifier {
       _sendReadStatus(dialog, dlgId);
     }
 
+    _maybeNotifyIncomingMessage(dialog, dlgId, message);
     notifyListeners();
+  }
+
+  /// Баннер как в Telegram Desktop: чужой msg, чат не открыт, не muted.
+  ///
+  /// Пока WS online сервер шлёт `msg` (не FCM). Баннер — локальный.
+  /// Политика как Telegram Desktop (см. [allowMessageBanner]).
+  void _maybeNotifyIncomingMessage(
+    DialogsListViewModel dialog,
+    String dlgId,
+    MessageViewModel message,
+  ) {
+    if (message.my) return;
+    if (message.isCall) return;
+
+    final n = _notificationSettings;
+    final preview = MentionMarkup.toDisplayText(_previewFor(message)).trim();
+    final body = n.messagePreview
+        ? (preview.isNotEmpty ? preview : 'Новое сообщение')
+        : 'Новое сообщение';
+    final title = n.namesInNotifications && n.messagePreview
+        ? (dialog.chatName.trim().isNotEmpty ? dialog.chatName : 'Forum')
+        : 'Forum';
+
+    ApiLogger.instance.logEvent(
+      'PUSH',
+      'banner? dlg=$dlgId fg=$_appInForeground selected=$_selectedId',
+    );
+    unawaited(
+      DesktopNotificationService.instance.showMessage(
+        dlgId: dlgId,
+        chatTitle: title,
+        body: body,
+        senderName: n.namesInNotifications ? message.fr_name : null,
+        isGroup: dialog.isGrp,
+        playSound: n.soundOn && n.soundFile.trim().isNotEmpty,
+      ),
+    );
   }
 
   void _onMsgDelPush(Map<String, dynamic> map) {
@@ -4112,6 +4500,20 @@ class AppState extends ChangeNotifier {
       _syncTaggedFlagFromIds(dialog, dlgId);
     }
 
+    if (!result.isHistory && added > 0) {
+      // Баннер по последнему входящему из пачки (как один toast в Telegram).
+      MessageViewModel? lastIncoming;
+      for (final m in filteredMessages.reversed) {
+        if (!m.my && !m.isCall) {
+          lastIncoming = m;
+          break;
+        }
+      }
+      if (lastIncoming != null) {
+        _maybeNotifyIncomingMessage(dialog, dlgId, lastIncoming);
+      }
+    }
+
     notifyListeners();
   }
 
@@ -4130,12 +4532,42 @@ class AppState extends ChangeNotifier {
       if (old != null && old.messages.isNotEmpty) {
         d.messages = List<MessageViewModel>.from(old.messages);
       }
+      // Не терять превью: dlg_list иногда отдаёт пустой last_msg.
+      if (old != null && d.last_msg.trim().isEmpty) {
+        if (old.last_msg.trim().isNotEmpty) {
+          d.last_msg = old.last_msg;
+          d.last_msg_id = old.last_msg_id;
+          d.last_msg_fr_id = old.last_msg_fr_id;
+          d.last_msg_fr_name = old.last_msg_fr_name;
+          d.last_msg_dttmcr = old.last_msg_dttmcr;
+          d.last_msg_status = old.last_msg_status;
+        } else if (d.messages.isNotEmpty) {
+          _updateDialogPreview(d, d.messages.last);
+        }
+      }
+      if (d.isCh) {
+        d.last_msg_fr_name = '';
+      }
       if (old != null && old.chatMuted) {
         d.chatMuted = true;
       }
       // После dlg_join карточка уже в dlg_list — сбрасываем awaitingJoin.
       if (old != null && old.awaitingJoin) {
         d.awaitingJoin = false;
+      }
+      // Sticky is_ch: dlg_list часто шлёт 0 даже для каналов.
+      if (d.isCh ||
+          (old?.isCh ?? false) ||
+          _isKnownChannelId(id)) {
+        d.isCh = true;
+        _rememberChannelId(id);
+        // Не затирать нормальное имя stub'ом «Канал» с прошлого hydrate.
+        if (_isGenericChannelTitle(d.chatName) &&
+            old != null &&
+            !_isGenericChannelTitle(old.chatName)) {
+          d.chatName = old.chatName;
+        }
+        _repairGenericChannelTitle(d);
       }
     }
     _applyLocalDialogPrefs(incoming);
@@ -4165,14 +4597,282 @@ class AppState extends ChangeNotifier {
       final id = pending.id?.trim() ?? '';
       if (DialogsListViewModel.isPlaceholderDlgId(id)) continue;
       if (incoming.any((d) => _sameDlgId(d.id, id))) continue;
-      incoming.insert(0, pending);
+      incoming.add(pending);
     }
 
-    return incoming;
+    // Уже вступившие каналы, которых ещё нет в dlg_list.
+    // Не insert(0): иначе каждый poll двигает их в начало и прыгает выделение.
+    for (final old in _dialogs) {
+      final id = old.id?.trim() ?? '';
+      if (DialogsListViewModel.isPlaceholderDlgId(id)) continue;
+      if (!old.isCh && !_isKnownChannelId(id)) continue;
+      if (incoming.any((d) => _sameDlgId(d.id, id))) continue;
+      if (_isSuppressedDlg(id)) continue;
+      old.isCh = true;
+      old.awaitingJoin = false;
+      _repairGenericChannelTitle(old);
+      incoming.add(old);
+    }
+
+    return _stableDialogOrder(incoming);
+  }
+
+  /// Сохраняет порядок карточек как до refresh — иначе ListView скачет.
+  List<DialogsListViewModel> _stableDialogOrder(
+    List<DialogsListViewModel> incoming,
+  ) {
+    if (_dialogs.isEmpty || incoming.isEmpty) return incoming;
+    final byKey = <String, DialogsListViewModel>{};
+    for (final d in incoming) {
+      final id = d.id?.trim() ?? '';
+      if (id.isEmpty) continue;
+      byKey[id] = d;
+    }
+    final out = <DialogsListViewModel>[];
+    final used = <String>{};
+    for (final old in _dialogs) {
+      final id = old.id?.trim() ?? '';
+      if (id.isEmpty) continue;
+      MapEntry<String, DialogsListViewModel>? hit;
+      for (final e in byKey.entries) {
+        if (_sameDlgId(e.key, id)) {
+          hit = e;
+          break;
+        }
+      }
+      if (hit == null) continue;
+      out.add(hit.value);
+      used.add(hit.key);
+    }
+    for (final e in byKey.entries) {
+      if (!used.contains(e.key)) out.add(e.value);
+    }
+    return out;
+  }
+
+  static bool _isGenericChannelTitle(String? name) {
+    final n = (name ?? '').trim().toLowerCase();
+    return n.isEmpty || n == 'канал' || n == 'channel';
+  }
+
+  void _repairGenericChannelTitle(DialogsListViewModel d) {
+    if (!_isGenericChannelTitle(d.chatName)) return;
+    final fr = d.last_msg_fr_name.trim();
+    if (fr.isNotEmpty && fr.toLowerCase() != 'канал') {
+      d.chatName = fr;
+      return;
+    }
+    final nick = d.groupAditionalInfo?.nick?.trim() ?? '';
+    if (nick.isNotEmpty && nick.toLowerCase() != 'канал') {
+      d.chatName = nick;
+    }
+  }
+
+  bool _isKnownChannelId(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    if (key.isEmpty) return false;
+    return _channelDlgIds.any((id) => _sameDlgId(id, key));
+  }
+
+  void _rememberChannelId(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    if (key.isEmpty || DialogsListViewModel.isPlaceholderDlgId(key)) return;
+    if (_isKnownChannelId(key)) return;
+    _channelDlgIds.add(key);
+    unawaited(_saveDialogLocalPrefs());
+  }
+
+  void _forgetChannelId(String? dlgId) {
+    final key = dlgId?.trim() ?? '';
+    if (key.isEmpty) return;
+    final before = _channelDlgIds.length;
+    _channelDlgIds.removeWhere((id) => _sameDlgId(id, key));
+    if (_channelDlgIds.length != before) {
+      unawaited(_saveDialogLocalPrefs());
+    }
+  }
+
+  /// Для известных каналов без карточки / с именем «Канал» — dlg_info + превью.
+  Future<void> _hydrateMissingChannelCards() async {
+    if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
+      return;
+    }
+    final needFetch = <String>[];
+    for (final id in _channelDlgIds) {
+      if (_isSuppressedDlg(id)) continue;
+      final d = _findDialog(id);
+      if (d != null) {
+        d.isCh = true;
+        _repairGenericChannelTitle(d);
+        if (!_isGenericChannelTitle(d.chatName)) continue;
+      }
+      needFetch.add(id);
+    }
+    if (needFetch.isEmpty) return;
+
+    _channelsHydrating = true;
+    notifyListeners();
+    final needPreview = <String>[];
+    var changed = false;
+    try {
+      for (final id in needFetch.take(8)) {
+        try {
+          final info = await _api.fetchDlgInfo(
+            dlgId: id,
+            currentUserId: _profile?.id,
+          );
+          if (info.users.isEmpty &&
+              !info.isCh &&
+              (info.groupNick == null || info.groupNick!.trim().isEmpty)) {
+            continue;
+          }
+          _rememberChannelId(id);
+          final title = (info.groupNick ?? '').trim();
+          DlgInfoMember? channelUser;
+          for (final u in info.users) {
+            if (u.phone.trim() == id.trim()) {
+              channelUser = u;
+              break;
+            }
+          }
+          if (channelUser == null) {
+            for (final u in info.users) {
+              if (u.isOwner) {
+                channelUser = u;
+                break;
+              }
+            }
+          }
+          final resolved = title.isNotEmpty
+              ? title
+              : (channelUser?.name.trim() ?? '');
+          final ava = channelUser?.avatarUrl ?? '';
+
+          final existing = _findDialog(id);
+          if (existing != null) {
+            existing.isCh = true;
+            if (resolved.isNotEmpty &&
+                _isGenericChannelTitle(existing.chatName)) {
+              existing.chatName = resolved;
+              changed = true;
+            }
+            final infoModel =
+                existing.groupAditionalInfo ?? GroupAditionalInfoModel();
+            if (resolved.isNotEmpty) infoModel.nick = resolved;
+            infoModel.isPublic = true;
+            existing.groupAditionalInfo = infoModel;
+            if (existing.last_msg.trim().isEmpty) needPreview.add(id);
+            ApiLogger.instance.logEvent(
+              'DLG_LIST',
+              'hydrate fix name dlg_id=$id → ${existing.chatName}',
+            );
+            continue;
+          }
+
+          if (resolved.isEmpty) continue;
+          final card = DialogsListViewModel(
+            id: id,
+            chatName: resolved,
+            avatar: ava,
+            colAvaId: channelUser?.colAvaId ?? 1,
+            isGrp: true,
+            isCh: true,
+            chatType: ChatType.groupChat,
+            groupAditionalInfo: GroupAditionalInfoModel(
+              desc: info.about ?? info.groupDesc,
+              nick: resolved,
+              isPublic: true,
+              colAvalId: channelUser?.colAvaId,
+            ),
+          );
+          _upsertDialog(card);
+          needPreview.add(id);
+          changed = true;
+          ApiLogger.instance.logEvent(
+            'DLG_LIST',
+            'hydrate channel dlg_id=$id name=$resolved is_ch=${info.isCh}',
+          );
+        } catch (e) {
+          ApiLogger.instance.logEvent(
+            'DLG_LIST',
+            'hydrate channel $id failed: $e',
+          );
+        }
+      }
+      if (changed) notifyListeners();
+      // Сразу превью — иначе пустая строка до клика по каналу.
+      for (final id in needPreview) {
+        await _fillDialogPreview(id, forceNetwork: true);
+      }
+    } finally {
+      _channelsHydrating = false;
+      notifyListeners();
+    }
+  }
+
+  /// Заполнить last_msg для одного диалога (кэш → msg_list).
+  Future<void> _fillDialogPreview(
+    String dlgId, {
+    bool forceNetwork = false,
+  }) async {
+    final id = dlgId.trim();
+    if (id.isEmpty) return;
+    final d = _findDialog(id);
+    if (d == null) return;
+    if (d.last_msg.trim().isNotEmpty) return;
+
+    if (d.messages.isEmpty) {
+      await _restoreMessagesFromCache(id);
+    }
+    if (d.messages.isNotEmpty) {
+      _updateDialogPreview(d, d.messages.last);
+      _previewHydrateTriedIds.add(id);
+      notifyListeners();
+      return;
+    }
+
+    if (!forceNetwork &&
+        _previewHydrateTriedIds.any((x) => _sameDlgId(x, id))) {
+      return;
+    }
+    if (_connectionStatus != ConnectionStatus.connected || !_api.isConnected) {
+      return;
+    }
+
+    _previewHydrateTriedIds.add(id);
+    _previewHydratingIds.add(id);
+    notifyListeners();
+    try {
+      final result = await _api.fetchMessageList(
+        id,
+        request: MsgListRequest.initial(),
+        currentUserId: _profile?.id,
+        currentUserName: _reactionAuthorName,
+        isGroupChat: d.isGrp,
+      );
+      final filtered = _withFilteredMessages(result, id);
+      if (filtered.messages.isEmpty) return;
+      const page = MsgListResult.historyPageSize;
+      var msgs = filtered.messages;
+      if (msgs.length > page) {
+        msgs = msgs.sublist(msgs.length - page);
+      }
+      if (d.messages.isEmpty) {
+        d.messages = msgs;
+        MessageMapper.applyGrouping(d.messages, isGroupChat: d.isGrp);
+      }
+      _updateDialogPreview(d, msgs.last);
+      notifyListeners();
+    } catch (_) {
+    } finally {
+      _previewHydratingIds.remove(id);
+      notifyListeners();
+    }
   }
 
   void _scheduleReconnect() {
     if (!_isAuthenticated) return;
+    if (_holdOfflineForPush) return;
     if (_reconnectPending) return;
     _reconnectPending = true;
     _stopDialogsLiveSync();
@@ -4189,6 +4889,12 @@ class AppState extends ChangeNotifier {
         _profile = await _api.login(
           uid,
           fcmToken: FirebaseService.instance.fcmToken,
+          notifications: _notificationSettings,
+        );
+        unawaited(
+          FirebaseService.instance.onLoggedIn(
+            notifications: _notificationSettings,
+          ),
         );
         _connectionStatus = ConnectionStatus.connected;
         _connectionError = null;
@@ -4220,6 +4926,9 @@ class AppState extends ChangeNotifier {
     _archivedIds
       ..clear()
       ..addAll(loaded.archived);
+    _channelDlgIds
+      ..clear()
+      ..addAll(loaded.channelIds);
     _applyLocalDialogPrefs(_dialogs);
     _scheduleMuteExpiry();
   }
@@ -4228,6 +4937,7 @@ class AppState extends ChangeNotifier {
     return DialogLocalPrefs.save(
       mutedUntil: Map<String, int>.from(_mutedUntil),
       archived: Set<String>.from(_archivedIds),
+      channelIds: Set<String>.from(_channelDlgIds),
     );
   }
 
@@ -4385,7 +5095,9 @@ class AppState extends ChangeNotifier {
   void _updateDialogPreview(DialogsListViewModel dialog, MessageViewModel m) {
     dialog.last_msg = _previewFor(m);
     dialog.last_msg_dttmcr = m.dtshow.isNotEmpty ? m.dtshow : _nowTime();
-    dialog.last_msg_fr_name = m.my ? 'Вы' : m.fr_name;
+    // В списке каналов отправителя не показываем (иначе дубль имени канала).
+    dialog.last_msg_fr_name =
+        dialog.isCh ? '' : (m.my ? 'Вы' : m.fr_name);
     dialog.last_msg_status = m.my ? m.status : -2;
     if (MsgListCursors.isSavedMessage(m)) {
       dialog.last_msg_id = m.id;
@@ -4393,6 +5105,39 @@ class AppState extends ChangeNotifier {
     dialog.last_msg_fr_id = m.my
         ? (_profile?.id ?? '')
         : (m.fr_id ?? dialog.last_msg_fr_id);
+  }
+
+  /// Превью last_msg при старте (кэш; сеть — один раз на чат за сессию).
+  Future<void> _hydrateEmptyDialogPreviews() async {
+    if (_previewHydrateRunning) return;
+    _previewHydrateRunning = true;
+    try {
+      final need = _dialogs
+          .where(
+            (d) =>
+                d.last_msg.trim().isEmpty &&
+                !DialogsListViewModel.isPlaceholderDlgId(d.id),
+          )
+          .take(12)
+          .toList();
+      for (final d in need) {
+        await _waitWhileSelectedChatLoading();
+        await _fillDialogPreview(d.id!.trim());
+      }
+    } finally {
+      _previewHydrateRunning = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _waitWhileSelectedChatLoading() async {
+    for (var i = 0; i < 200; i++) {
+      final selected = _selectedId?.trim() ?? '';
+      if (selected.isEmpty) return;
+      final busy = _messageLoadsInFlight.keys.any((k) => _sameDlgId(k, selected));
+      if (!busy && !_messagesLoading) return;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
   }
 
   void _appendOutgoingSkeleton(
@@ -4492,7 +5237,12 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> sendMediaMessage(List<MediaFile> files, {String caption = ''}) async {
+  Future<void> sendMediaMessage(
+    List<MediaFile> files, {
+    String caption = '',
+    bool noCompression = false,
+    bool highQuality = false,
+  }) async {
     final dialog = selectedDialog;
     final dlgId = dialog?.id;
     final batch = files.take(10).toList();
@@ -4516,6 +5266,7 @@ class AppState extends ChangeNotifier {
       my: true,
       body: cap,
       text: cap,
+      desc: cap,
       ai: _aiForDialog(dialog),
       fr_name: _profile?.name ?? 'Вы',
       fr_id: _profile?.id,
@@ -4546,18 +5297,37 @@ class AppState extends ChangeNotifier {
           originalName: file.fname.isNotEmpty ? file.fname : 'screenshot.png',
           bytes: file.bytes,
           path: file.URL,
+          noCompression: noCompression,
+          highQuality: highQuality,
         );
 
-        // Сразу показать лёгкий JPEG в пузыре (вместо исходного Retina PNG).
+        // Сразу показать превью в пузыре (JPEG после сжатия / оригинал).
+        final previewKind = FileKind.kindFromName(prepared.fileName);
+        final isVideo = FileKind.isVideoKind(previewKind) ||
+            FileKind.isVideoKind(file.kind) ||
+            file.isVideo;
+        final previewW =
+            (isVideo && file.width.isNotEmpty) ? file.width : prepared.width;
+        final previewH =
+            (isVideo && file.height.isNotEmpty) ? file.height : prepared.height;
+        final previewDur =
+            prepared.duration > 0 ? prepared.duration : file.duration;
         final previewFile = MediaFile(
           fname: prepared.fileName,
-          kind: 'jpeg',
+          kind: previewKind.isNotEmpty
+              ? previewKind
+              : (isVideo
+                  ? (file.kind.isNotEmpty ? file.kind : 'mp4')
+                  : 'jpeg'),
           size: prepared.bytes.length,
-          width: prepared.width,
-          height: prepared.height,
+          width: previewW,
+          height: previewH,
+          duration: previewDur,
           bytes: prepared.bytes,
           URL: file.URL,
+          preview: file.preview,
         );
+        MediaThumbCache.alias(file, previewFile);
         skeleton.files = [
           ...updatedFiles,
           previewFile,
@@ -4568,30 +5338,34 @@ class AppState extends ChangeNotifier {
         final result = await _api.uploadMediaWithDimensions(
           bytes: prepared.bytes,
           originalName: prepared.fileName,
-          duration: prepared.duration,
-          width: prepared.width,
-          height: prepared.height,
+          duration: previewDur,
+          width: previewW.isNotEmpty ? previewW : prepared.width,
+          height: previewH.isNotEmpty ? previewH : prepared.height,
         );
         final uploaded = result.file;
 
         uploadedEntries.add(
-          result.toMediaBodyEntry(duration: prepared.duration.toString()),
+          result.toMediaBodyEntry(duration: previewDur.toString()),
         );
 
-        updatedFiles.add(MediaFile(
+        final uploadedFile = MediaFile(
           hash: uploaded.hash,
           url: uploaded.publicUrl,
           fname: uploaded.fname,
           fdir: uploaded.fdir,
           kind: uploaded.kind,
           size: uploaded.size,
-          width: result.width,
-          height: result.height,
-          duration: prepared.duration,
+          width: previewW.isNotEmpty ? previewW : result.width,
+          height: previewH.isNotEmpty ? previewH : result.height,
+          duration: previewDur,
           uploaded: true,
           bytes: prepared.bytes,
           URL: file.URL,
-        ));
+          preview: file.preview,
+        );
+        MediaThumbCache.alias(file, uploadedFile);
+        MediaThumbCache.alias(previewFile, uploadedFile);
+        updatedFiles.add(uploadedFile);
         skeleton.files = [
           ...updatedFiles,
           ...batch.skip(updatedFiles.length),
@@ -4902,6 +5676,14 @@ class AppState extends ChangeNotifier {
     try {
       final info = await _sharedDlgInfo(key, force: force);
       _storeGroupMembers(key, info.users);
+      if (info.isCh) {
+        _rememberChannelId(key);
+        final d = _findDialog(key);
+        if (d != null && !d.isCh) {
+          d.isCh = true;
+          notifyListeners();
+        }
+      }
     } catch (e) {
       ApiLogger.instance.logEvent('DLG_INFO', 'members for @$key: $e');
       // Не кэшируем пустой список — иначе @-пикер навсегда без людей.
@@ -5417,10 +6199,26 @@ class AppState extends ChangeNotifier {
     if (_composerPendingAttachments.isEmpty) return;
     final pending = List<MediaFile>.from(_composerPendingAttachments);
     clearComposerAttachments(notify: false);
+    await sendAttachmentBatch(pending, caption: caption);
+  }
 
+  /// Отправка пакета файлов/медиа с подписью (диалог как в Telegram).
+  ///
+  /// [sendAsMedia] — «Как медиафайл»; иначе type=file.
+  /// [noCompression] / [highQuality] — только для media-пути.
+  Future<void> sendAttachmentBatch(
+    List<MediaFile> files, {
+    String caption = '',
+    bool sendAsMedia = true,
+    bool noCompression = false,
+    bool highQuality = false,
+  }) async {
+    if (files.isEmpty) return;
+
+    final batch = files.take(MediaMessageLayout.maxFiles).toList();
     final media = <MediaFile>[];
     final docs = <MediaFile>[];
-    for (final f in pending) {
+    for (final f in batch) {
       if (ChatFileDnd.isMediaAttachment(f)) {
         media.add(f);
       } else {
@@ -5429,18 +6227,27 @@ class AppState extends ChangeNotifier {
     }
 
     final cap = caption.trim();
-    if (media.isNotEmpty) {
-      await sendMediaMessage(media, caption: cap);
+    final asMedia = sendAsMedia && docs.isEmpty && media.isNotEmpty;
+    if (asMedia) {
+      await sendMediaMessage(
+        media,
+        caption: cap,
+        noCompression: noCompression,
+        highQuality: highQuality,
+      );
+    } else if (batch.isNotEmpty) {
+      // Документы / «не как медиа» — одно file-сообщение + подпись.
+      await sendFileMessage(batch, caption: cap);
     } else if (cap.isNotEmpty) {
       await sendMessage(EmoticonReplacer.replace(cap));
-    }
-    if (docs.isNotEmpty) {
-      await sendFileMessage(docs);
     }
     notifyListeners();
   }
 
-  Future<void> sendFileMessage(List<MediaFile> files) async {
+  Future<void> sendFileMessage(
+    List<MediaFile> files, {
+    String caption = '',
+  }) async {
     final dialog = selectedDialog;
     final dlgId = dialog?.id;
     final batch = files.take(10).toList();
@@ -5449,21 +6256,23 @@ class AppState extends ChangeNotifier {
     final connected =
         _connectionStatus == ConnectionStatus.connected && _api.isConnected;
 
+    final cap = EmoticonReplacer.replace(caption.trim());
     final hash = ClientMsgHash.generate();
     final nowIso = _nowIso();
     final last = dialog.messages.isNotEmpty ? dialog.messages.last : null;
     final sameAuthorAsPrev = last?.my == true;
     final firstTitle = MediaDisplayName.forFile(batch.first, dttmcr: nowIso);
-    final preview = batch.length > 1
-        ? 'Файлы (${batch.length})'
-        : firstTitle;
+    final preview = cap.isNotEmpty
+        ? cap
+        : (batch.length > 1 ? 'Файлы (${batch.length})' : firstTitle);
 
     final skeleton = MessageViewModel(
       id: hash,
       type: 'file',
       my: true,
-      body: '',
-      text: '',
+      body: cap,
+      text: cap,
+      desc: cap,
       ai: _aiForDialog(dialog),
       fr_name: _profile?.name ?? 'Вы',
       fr_id: _profile?.id,
@@ -5500,34 +6309,59 @@ class AppState extends ChangeNotifier {
           originalName: title,
         );
 
-        uploadedEntries.add(uploaded.toDocumentFileJson(title: title));
+        final kind = uploaded.kind.trim().isNotEmpty
+            ? uploaded.kind
+            : (file.kind.trim().isNotEmpty
+                ? file.kind
+                : FileKind.kindFromName(title));
+        uploadedEntries.add(
+          uploaded.toDocumentFileJson(
+            title: title,
+            kind: kind,
+            width: file.width,
+            height: file.height,
+          ),
+        );
         updatedFiles.add(MediaFile(
           hash: uploaded.hash,
           url: uploaded.publicUrl,
           fname: uploaded.fname,
           fdir: uploaded.fdir,
-          kind: uploaded.kind,
+          kind: kind,
           size: uploaded.size,
           title: title,
           uploaded: true,
           bytes: file.bytes ?? bytes,
           URL: file.URL,
+          width: file.width,
+          height: file.height,
         ));
       }
 
       skeleton.files = updatedFiles;
       skeleton.fileTitle = firstTitle;
+      skeleton.desc = cap;
+      skeleton.body = cap;
+      skeleton.text = cap;
 
-      final bodyJson = jsonEncode({
-        'desc': '',
+      // Как у media: подпись в `desc`. Плюс корневые поля первого файла —
+      // iOS DataConverter/FileMessageCell читает title/fname/desc с корня.
+      final first = updatedFiles.first;
+      final bodyMap = <String, dynamic>{
+        'desc': cap,
+        'kind': first.kind,
+        'title': firstTitle,
+        'size': first.size.toString(),
+        'fname': first.fname,
+        'fdir': first.fdir,
         'files': uploadedEntries,
-      });
+      };
 
       final payload = <String, dynamic>{
         'type': 'file',
         'hash': hash,
         'ai': _aiForDialog(dialog),
-        'body': bodyJson,
+        'body': jsonEncode(bodyMap),
       };
       _applyMsgTarget(payload, dialog);
       _api.sendMsg(payload);
@@ -5539,6 +6373,148 @@ class AppState extends ChangeNotifier {
       ApiLogger.instance.logEvent('UPLOAD', 'file: $e');
       notifyListeners();
     }
+  }
+
+  /// Голосовое сообщение (type=voice) с гистограммой.
+  Future<void> sendVoiceMessage({
+    required String localPath,
+    required int durationSec,
+    List<int> histogram = const [],
+  }) async {
+    final dialog = selectedDialog;
+    final dlgId = dialog?.id;
+    if (dialog == null || dlgId == null) return;
+    final file = File(localPath);
+    if (!await file.exists()) return;
+    final bytes = await file.readAsBytes();
+    if (bytes.isEmpty) return;
+
+    final connected =
+        _connectionStatus == ConnectionStatus.connected && _api.isConnected;
+    final hash = ClientMsgHash.generate();
+    final nowIso = _nowIso();
+    final last = dialog.messages.isNotEmpty ? dialog.messages.last : null;
+    final sameAuthorAsPrev = last?.my == true;
+    final name = '$hash.m4a';
+    final hist = histogram.isNotEmpty
+        ? histogram
+        : VoiceHistogram.placeholder(durationSec: durationSec.clamp(1, 3600));
+
+    final media = MediaFile(
+      fname: name,
+      title: name,
+      kind: 'm4a',
+      size: bytes.length,
+      duration: durationSec,
+      bytes: bytes,
+      URL: localPath,
+    );
+
+    final skeleton = MessageViewModel(
+      id: hash,
+      type: 'voice',
+      my: true,
+      body: 'Голосовое сообщение',
+      text: 'Голосовое сообщение',
+      ai: _aiForDialog(dialog),
+      fr_name: _profile?.name ?? 'Вы',
+      fr_id: _profile?.id,
+      dttmcr: nowIso,
+      dtshow: _nowTime(),
+      status: -1,
+      hash: hash,
+      showUserName: false,
+      avaOnTop: !sameAuthorAsPrev,
+      avaOnBottom: true,
+      files: [media],
+      voiceHistogram: hist,
+      fileFormat: 'm4a',
+      fileSize: media.humanSize,
+    );
+    _appendOutgoingSkeleton(dialog, skeleton, preview: 'Голосовое сообщение');
+    if (!connected) return;
+
+    try {
+      final uploaded = await _api.uploadDocumentAttachment(
+        bytes: bytes,
+        originalName: name,
+      );
+      final updated = MediaFile(
+        hash: uploaded.hash,
+        url: uploaded.publicUrl,
+        fname: uploaded.fname,
+        fdir: uploaded.fdir,
+        kind: uploaded.kind.isNotEmpty ? uploaded.kind : 'm4a',
+        size: uploaded.size,
+        duration: durationSec,
+        uploaded: true,
+        bytes: bytes,
+        URL: localPath,
+      );
+      skeleton.files = [updated];
+      final bodyMap = <String, dynamic>{
+        'kind': updated.kind,
+        'fname': updated.fname,
+        'fdir': updated.fdir,
+        'hash': updated.hash,
+        'duration': durationSec.toString(),
+        'size': updated.size.toString(),
+        'hist': VoiceHistogram.toHex(hist),
+        'desc': '',
+      };
+      final payload = <String, dynamic>{
+        'type': 'voice',
+        'hash': hash,
+        'ai': _aiForDialog(dialog),
+        'body': jsonEncode(bodyMap),
+        'voice_histogram': hist,
+      };
+      _applyMsgTarget(payload, dialog);
+      _api.sendMsg(payload);
+      if (skeleton.status < 0) {
+        skeleton.status = 0;
+        notifyListeners();
+      }
+    } catch (e) {
+      ApiLogger.instance.logEvent('UPLOAD', 'voice: $e');
+      notifyListeners();
+    }
+  }
+
+  /// Круглое видео-сообщение (как video note) — отправляем type=media.
+  Future<void> sendVideoNote({
+    required String localPath,
+    required int durationSec,
+  }) async {
+    final file = File(localPath);
+    if (!await file.exists()) return;
+    final bytes = await file.readAsBytes();
+    if (bytes.isEmpty) return;
+    final name = localPath.split(Platform.pathSeparator).last;
+    final kind = FileKind.kindFromName(name);
+    final media = MediaFile(
+      fname: name.isNotEmpty ? name : 'video_note.mp4',
+      title: name,
+      kind: kind.isNotEmpty ? kind : 'mp4',
+      size: bytes.length,
+      duration: durationSec,
+      bytes: bytes,
+      URL: localPath,
+      width: '480',
+      height: '480',
+    );
+    // Кадр до появления пузыря + путь в preview — MediaThumbTile рисует сразу.
+    try {
+      final thumb = await MediaThumbCache.ensureThumbnail(media);
+      media.preview = thumb.path;
+    } catch (e) {
+      ApiLogger.instance.logEvent('UPLOAD', 'video_note thumb: $e');
+    }
+    await sendMediaMessage(
+      [media],
+      caption: '',
+      noCompression: true,
+    );
   }
 
   /// Повторная отправка локальных скелетов после восстановления связи.
@@ -5751,6 +6727,8 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _dockBadgeDebounce?.cancel();
+    unawaited(DockBadgeService.instance.clear());
     _stopDialogsLiveSync();
     FirebaseService.instance.onChatRelatedPush = null;
     _api.onMsgPush = null;

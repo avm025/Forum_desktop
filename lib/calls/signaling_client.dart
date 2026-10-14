@@ -86,10 +86,9 @@ class CallSignalingClient {
     _failAuthWait(StateError('disconnected'));
     await _sub?.cancel();
     _sub = null;
-    try {
-      await _channel?.sink.close();
-    } catch (_) {}
+    final channel = _channel;
     _channel = null;
+    await forceCloseWebSocket(channel);
   }
 
   void dispose() {

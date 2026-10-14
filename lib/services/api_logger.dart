@@ -129,6 +129,13 @@ $body
     });
   }
 
+  /// Принудительный flush (выход / Cmd+Q), чтобы не потерять последние WS/PUSH.
+  Future<void> flushNow() async {
+    _flushTimer?.cancel();
+    _flushScheduled = false;
+    await _flushToDisk();
+  }
+
   Future<void> _flushToDisk() async {
     if (_logFile == null || _flushInProgress) return;
     _flushInProgress = true;

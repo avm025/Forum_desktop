@@ -108,18 +108,78 @@ class MediaPreprocessor {
 
   static const _maxPhotoSide = 1280;
   static const _jpegQuality = 50; // iOS compressionQuality 0.5
+  static const _hdMaxPhotoSide = 2560;
+  static const _hdJpegQuality = 85;
   static const _uuid = Uuid();
 
   static Future<PreparedUploadMedia> prepare({
     required String originalName,
     Uint8List? bytes,
     String? path,
+    bool noCompression = false,
+    bool highQuality = false,
   }) async {
     final kind = FileKind.kindFromName(originalName);
     if (FileKind.isVideoKind(kind)) {
+      // Видеосообщения (noCompression): без перекодирования — превью сразу.
+      if (noCompression) {
+        return _prepareVideoPassthrough(
+          originalName: originalName,
+          bytes: bytes,
+          path: path,
+        );
+      }
       return _prepareVideo(originalName: originalName, bytes: bytes, path: path);
     }
-    return _preparePhoto(bytes: bytes, path: path, originalName: originalName);
+    if (noCompression) {
+      return _preparePhotoUncompressed(
+        originalName: originalName,
+        bytes: bytes,
+        path: path,
+      );
+    }
+    final maxSide = highQuality ? _hdMaxPhotoSide : _maxPhotoSide;
+    final quality = highQuality ? _hdJpegQuality : _jpegQuality;
+    return _preparePhoto(
+      bytes: bytes,
+      path: path,
+      originalName: originalName,
+      maxSide: maxSide,
+      jpegQuality: quality,
+    );
+  }
+
+  /// Без сжатия: исходные байты как есть.
+  static Future<PreparedUploadMedia> _preparePhotoUncompressed({
+    required String originalName,
+    Uint8List? bytes,
+    String? path,
+  }) async {
+    Uint8List raw;
+    if (path != null && path.isNotEmpty && await File(path).exists()) {
+      raw = await File(path).readAsBytes();
+    } else if (bytes != null && bytes.isNotEmpty) {
+      raw = bytes;
+    } else {
+      throw StateError('Нет данных файла для подготовки');
+    }
+    var width = '';
+    var height = '';
+    if (path != null && path.isNotEmpty && Platform.isMacOS) {
+      final dims = await _sipsPixelSize(path);
+      width = dims.$1;
+      height = dims.$2;
+    }
+    ApiLogger.instance.logEvent(
+      'MEDIA',
+      'photo(raw): ${raw.length} bytes, ${width}×$height',
+    );
+    return PreparedUploadMedia(
+      bytes: raw,
+      fileName: originalName,
+      width: width,
+      height: height,
+    );
   }
 
   /// Фото: на macOS — `sips` (нативно, без зависания на скринах Retina).
@@ -128,6 +188,8 @@ class MediaPreprocessor {
     required String originalName,
     Uint8List? bytes,
     String? path,
+    int maxSide = _maxPhotoSide,
+    int jpegQuality = _jpegQuality,
   }) async {
     await Future<void>.delayed(Duration.zero);
 
@@ -161,7 +223,7 @@ class MediaPreprocessor {
               int.tryParse(dims.$1) ?? 0,
               int.tryParse(dims.$2) ?? 0,
             ].fold<int>(0, (a, b) => a > b ? a : b);
-            if (maxDim > 0 && maxDim <= _maxPhotoSide) {
+            if (maxDim > 0 && maxDim <= maxSide) {
               final jpeg = await File(localPath).readAsBytes();
               final base = originalName.contains('.')
                   ? originalName.substring(0, originalName.lastIndexOf('.'))
@@ -186,6 +248,8 @@ class MediaPreprocessor {
           return await _preparePhotoViaSips(
             inputPath: localPath,
             originalName: originalName,
+            maxSide: maxSide,
+            jpegQuality: jpegQuality,
           );
         } catch (e) {
           ApiLogger.instance.logEvent('MEDIA', 'sips failed, fallback: $e');
@@ -198,8 +262,8 @@ class MediaPreprocessor {
           path: localPath,
           bytes: localPath == null ? bytes : null,
           originalName: originalName,
-          maxSide: _maxPhotoSide,
-          jpegQuality: _jpegQuality,
+          maxSide: maxSide,
+          jpegQuality: jpegQuality,
         ),
       );
 
@@ -228,6 +292,8 @@ class MediaPreprocessor {
   static Future<PreparedUploadMedia> _preparePhotoViaSips({
     required String inputPath,
     required String originalName,
+    int maxSide = _maxPhotoSide,
+    int jpegQuality = _jpegQuality,
   }) async {
     final dir = await getTemporaryDirectory();
     final outPath = '${dir.path}/forum_up_${_uuid.v4()}.jpg';
@@ -237,13 +303,13 @@ class MediaPreprocessor {
       'sips',
       [
         '-Z',
-        '$_maxPhotoSide',
+        '$maxSide',
         '-s',
         'format',
         'jpeg',
         '-s',
         'formatOptions',
-        '$_jpegQuality',
+        '$jpegQuality',
         inputPath,
         '--out',
         outPath,
@@ -294,6 +360,26 @@ class MediaPreprocessor {
     final w = RegExp(r'pixelWidth:\s*(\d+)').firstMatch(out)?.group(1) ?? '';
     final h = RegExp(r'pixelHeight:\s*(\d+)').firstMatch(out)?.group(1) ?? '';
     return (w, h);
+  }
+
+  /// Видео без перекодирования (video note / noCompression).
+  static Future<PreparedUploadMedia> _prepareVideoPassthrough({
+    required String originalName,
+    Uint8List? bytes,
+    String? path,
+  }) async {
+    Uint8List out;
+    if (path != null && path.isNotEmpty && await File(path).exists()) {
+      out = await File(path).readAsBytes();
+    } else if (bytes != null && bytes.isNotEmpty) {
+      out = bytes;
+    } else {
+      throw StateError('Нет данных видео для отправки');
+    }
+    return PreparedUploadMedia(
+      bytes: out,
+      fileName: _mp4Name(originalName),
+    );
   }
 
   /// Видео: mp4, max 960 px через AVFoundation (macOS) / convertVideo.

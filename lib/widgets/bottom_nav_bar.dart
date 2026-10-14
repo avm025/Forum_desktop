@@ -4,7 +4,7 @@ import 'package:provider/provider.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 
-/// Нижняя навигация: Чаты / Проекты / Задачи / Новое / Профиль.
+/// Нижняя навигация: Чаты / Проекты / Новое / Профиль.
 class ForumBottomNav extends StatelessWidget {
   const ForumBottomNav({super.key});
 
@@ -51,17 +51,6 @@ class ForumBottomNav extends StatelessWidget {
                   compact: compact,
                   ultraCompact: ultraCompact,
                   onTap: () => state.setNavTab(BottomNavTab.projects),
-                ),
-              ),
-              Expanded(
-                child: _NavItem(
-                  icon: Icons.swap_horiz,
-                  label: 'Задачи',
-                  active: tab == BottomNavTab.tasks,
-                  palette: p,
-                  compact: compact,
-                  ultraCompact: ultraCompact,
-                  onTap: () => state.setNavTab(BottomNavTab.tasks),
                 ),
               ),
               Expanded(

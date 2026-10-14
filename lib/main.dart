@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'calls/call_manager.dart';
 import 'services/api_logger.dart';
+import 'services/desktop_notification_service.dart';
 import 'services/firebase_service.dart';
 import 'screens/auth/phone_login_screen.dart';
 import 'screens/home_screen.dart';
@@ -10,10 +14,14 @@ import 'state/app_state.dart';
 import 'theme/app_colors.dart';
 import 'widgets/call/call_host_overlay.dart';
 
+const _lifecycleChannel = MethodChannel('forum.me/lifecycle');
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ApiLogger.instance.init();
-  await FirebaseService.instance.initialize();
+  // Не блокируем первый кадр на APNs/FCM — иначе чёрное окно до runApp.
+  unawaited(FirebaseService.instance.initialize());
+  unawaited(DesktopNotificationService.instance.initialize());
   runApp(const ForumApp());
 }
 
@@ -27,6 +35,34 @@ class ForumApp extends StatelessWidget {
         ChangeNotifierProvider(
           create: (_) {
             final state = AppState();
+            _lifecycleChannel.setMethodCallHandler((call) async {
+              // Явный if — гарантированно один путь; result уходит в native после await.
+              if (call.method == 'willTerminate') {
+                await state.prepareForTerminate();
+                return true;
+              }
+              if (call.method == 'willSleep') {
+                await state.prepareForSleep();
+                return true;
+              }
+              if (call.method == 'didWake') {
+                await state.prepareForWake();
+                return true;
+              }
+              // Крестик → Dock: не рвать WS, только «не в фокусе» для баннеров.
+              if (call.method == 'windowHidden') {
+                state.onWindowHiddenToDock();
+                return true;
+              }
+              if (call.method == 'windowShown') {
+                state.onWindowShownFromDock();
+                return true;
+              }
+              throw PlatformException(
+                code: 'unimplemented',
+                message: call.method,
+              );
+            });
             WidgetsBinding.instance.addPostFrameCallback((_) {
               state.initialize();
             });

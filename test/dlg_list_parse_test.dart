@@ -98,4 +98,37 @@ void main() {
     });
     expect(d.last_msg, 'Медиафайлы');
   });
+
+  test('dlg is_ch=1 → isCh for Каналы folder', () {
+    final d = DialogMapper.fromServerJson({
+      'dlg_id': '9001',
+      'is_grp': 1,
+      'is_ch': 1,
+      'name': 'Новости Forum',
+      'ai': 0,
+      'unread': 3,
+      'last_msg': {
+        'id': 1,
+        'body': 'привет',
+        'type': 'txt',
+        'fr_id': '1',
+        'fr_name': 'Admin',
+        'status': 2,
+        'dttmcr': '2026-09-23T12:00:00.000+03:00',
+      },
+    });
+    expect(d.isCh, isTrue);
+    expect(d.isGrp, isTrue);
+    expect(d.chatName, 'Новости Forum');
+  });
+
+  test('dlg is_ch=0 → not a channel', () {
+    final d = DialogMapper.fromServerJson({
+      'dlg_id': '9002',
+      'is_grp': 1,
+      'is_ch': 0,
+      'name': 'Обычная группа',
+    });
+    expect(d.isCh, isFalse);
+  });
 }

@@ -7,8 +7,19 @@
 // The application's name. By default this is also the title of the Flutter window.
 PRODUCT_NAME = forum_app
 
-// The application's bundle identifier
+// The application's bundle identifier (как Firebase GoogleService-Info BUNDLE_ID)
 PRODUCT_BUNDLE_IDENTIFIER = forum.me
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.
+
+// Manual: Development_Mac profile (Push + this Mac). Bypass Xcode "invalid handle".
+DEVELOPMENT_TEAM = 6769R2LHF3
+DEVELOPMENT_TEAM[sdk=macosx*] = 6769R2LHF3
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Apple Development
+CODE_SIGN_IDENTITY[sdk=macosx*] = Apple Development
+PROVISIONING_PROFILE = 0c3ecd7b-be19-4dbb-a88c-8a9a3e47a5e5
+PROVISIONING_PROFILE[sdk=macosx*] = 0c3ecd7b-be19-4dbb-a88c-8a9a3e47a5e5
+PROVISIONING_PROFILE_SPECIFIER = Development Mac
+PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*] = Development Mac

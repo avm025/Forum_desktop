@@ -31,14 +31,17 @@ class MediaFileLoader {
   static Future<MediaFileSource> resolve(
     MediaFile file, {
     String? downloadUrl,
+    void Function(double? progress)? onProgress,
   }) async {
     if (file.bytes != null && file.bytes!.isNotEmpty) {
+      onProgress?.call(1);
       return MediaFileSource(bytes: file.bytes, networkUrl: file.url);
     }
 
     if (file.URL != null && file.URL!.isNotEmpty) {
       final local = File(file.URL!);
       if (await local.exists()) {
+        onProgress?.call(1);
         return MediaFileSource(localPath: local.path, networkUrl: file.url);
       }
     }
@@ -46,7 +49,11 @@ class MediaFileLoader {
     final url = (downloadUrl ?? file.url).trim();
     if (url.isNotEmpty) {
       if (url.startsWith('http://') || url.startsWith('https://')) {
-        final cached = await _cacheRemote(file, url);
+        final cached = await _cacheRemote(
+          file,
+          url,
+          onProgress: onProgress,
+        );
         return MediaFileSource(
           localPath: cached.path,
           networkUrl: url,
@@ -55,6 +62,7 @@ class MediaFileLoader {
       if (!url.startsWith('http')) {
         final local = File(url);
         if (await local.exists()) {
+          onProgress?.call(1);
           return MediaFileSource(localPath: local.path);
         }
       }
@@ -139,18 +147,31 @@ class MediaFileLoader {
   }
 
   /// Скачать в кэш (если ещё нет) и вернуть локальный путь.
+  /// [onProgress]: `0…1` или `null` (размер неизвестен).
   static Future<String> ensureCached(
     MediaFile file, {
     String? downloadUrl,
+    void Function(double? progress)? onProgress,
   }) async {
     final existing = await cachedPathIfExists(file, downloadUrl: downloadUrl);
-    if (existing != null) return existing;
+    if (existing != null) {
+      onProgress?.call(1);
+      return existing;
+    }
 
-    final source = await resolve(file, downloadUrl: downloadUrl);
-    if (source.hasLocalPath) return source.localPath!;
+    final source = await resolve(
+      file,
+      downloadUrl: downloadUrl,
+      onProgress: onProgress,
+    );
+    if (source.hasLocalPath) {
+      onProgress?.call(1);
+      return source.localPath!;
+    }
     if (source.hasBytes) {
       final local = await _cacheFileFor(file);
       await local.writeAsBytes(source.bytes!, flush: true);
+      onProgress?.call(1);
       return local.path;
     }
     throw StateError('Не удалось сохранить файл ${file.fname}');
@@ -194,12 +215,17 @@ class MediaFileLoader {
     return File('${dir.path}/$legacyName');
   }
 
-  static Future<File> _cacheRemote(MediaFile file, String url) async {
+  static Future<File> _cacheRemote(
+    MediaFile file,
+    String url, {
+    void Function(double? progress)? onProgress,
+  }) async {
     final local = await _cacheFileFor(file);
     final resolvedUrl = ApiConfig.rewriteLegacyHost(url.trim());
 
     if (await local.exists() && await local.length() > 0) {
       if (await _looksLikeExpectedMedia(file, local)) {
+        onProgress?.call(1);
         return local;
       }
       // Битый/чужой кэш (часто JPEG-превью или HTML 401 под именем видео).
@@ -213,29 +239,80 @@ class MediaFileLoader {
     if (await legacy.exists() && await legacy.length() > 0) {
       if (await _looksLikeExpectedMedia(file, legacy)) {
         await legacy.copy(local.path);
+        onProgress?.call(1);
         return local;
       }
     }
 
-    final response = await http
-        .get(
-          Uri.parse(resolvedUrl),
-          headers: ApiConfig.fileHeaders,
-        )
-        .timeout(const Duration(seconds: 120));
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError('HTTP ${response.statusCode}');
-    }
-    if (response.bodyBytes.isEmpty) {
-      throw StateError('Пустой ответ сервера');
-    }
-    // Сервер иногда отдаёт HTML/JSON ошибки с кодом 200.
-    if (_looksLikeHtmlOrJson(response.bodyBytes)) {
-      throw StateError('Сервер вернул не медиафайл');
-    }
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse(resolvedUrl));
+      request.headers.addAll(ApiConfig.fileHeaders);
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 120));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('HTTP ${response.statusCode}');
+      }
 
-    await local.writeAsBytes(response.bodyBytes, flush: true);
-    return local;
+      final total = response.contentLength;
+      final tmp = File('${local.path}.part');
+      if (await tmp.exists()) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+      }
+      final sink = tmp.openWrite();
+      var received = 0;
+      final head = <int>[];
+      try {
+        await for (final chunk in response.stream) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (head.length < 64) {
+            final need = 64 - head.length;
+            head.addAll(chunk.length <= need ? chunk : chunk.sublist(0, need));
+          }
+          if (onProgress != null) {
+            if (total != null && total > 0) {
+              onProgress((received / total).clamp(0.0, 1.0));
+            } else {
+              onProgress(null);
+            }
+          }
+        }
+        await sink.flush();
+        await sink.close();
+      } catch (e) {
+        try {
+          await sink.close();
+        } catch (_) {}
+        try {
+          await tmp.delete();
+        } catch (_) {}
+        rethrow;
+      }
+
+      if (received <= 0) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+        throw StateError('Пустой ответ сервера');
+      }
+      // Сервер иногда отдаёт HTML/JSON ошибки с кодом 200.
+      if (_looksLikeHtmlOrJson(Uint8List.fromList(head))) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+        throw StateError('Сервер вернул не медиафайл');
+      }
+
+      await tmp.rename(local.path);
+      onProgress?.call(1);
+      return local;
+    } finally {
+      client.close();
+    }
   }
 
   /// Видео не должно быть JPEG/PNG; иначе это превью под чужим именем.
