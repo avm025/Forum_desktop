@@ -28,6 +28,8 @@ class ContactsService {
   static Future<List<ApiContact>> loadContacts({bool force = false}) async {
     if (!force && _cache != null) return _cache!;
     if (kIsWeb) return const [];
+    // flutter_contacts на Windows часто без реализации / зависает на permission.
+    if (Platform.isWindows) return const [];
 
     try {
       return await _loadContactsInner().timeout(

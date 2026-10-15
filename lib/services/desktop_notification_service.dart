@@ -36,10 +36,20 @@ class DesktopNotificationService {
 
   Future<void> initialize() async {
     if (kIsWeb || _ready) return;
-    if (!Platform.isMacOS && !Platform.isLinux && !Platform.isWindows) {
-      return;
-    }
+    // Windows toast требует AUMID/GUID в runner; без них plugin может
+    // зависнуть на старте — не блокируем UI, баннеры пока только macOS/Linux.
+    if (Platform.isWindows) return;
+    if (!Platform.isMacOS && !Platform.isLinux) return;
 
+    try {
+      await _initializeSupportedPlatforms()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Не мешаем старту приложения.
+    }
+  }
+
+  Future<void> _initializeSupportedPlatforms() async {
     const darwin = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,

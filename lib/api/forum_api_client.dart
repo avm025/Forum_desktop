@@ -249,8 +249,9 @@ class ForumApiClient {
     final generation = ++_connectionGeneration;
     ApiLogger.instance.logEvent('WS', 'Подключение ${ApiConfig.wsHost}');
     try {
-      final channel = await connectForumWebSocket(ApiConfig.wsUri);
-      await awaitWebSocketReady(channel);
+      final channel = await connectForumWebSocket(ApiConfig.wsUri)
+          .timeout(const Duration(seconds: 15));
+      await awaitWebSocketReady(channel).timeout(const Duration(seconds: 15));
       if (generation != _connectionGeneration) {
         try {
           await channel.sink.close();

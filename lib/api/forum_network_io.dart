@@ -9,6 +9,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 /// Принимаем только наши хосты и CN=*4um.me (не любой чужой сертификат).
 HttpClient createForumRawHttpClient() {
   final client = HttpClient();
+  // Без таймаутов handshake на Windows может висеть бесконечно.
+  client.connectionTimeout = const Duration(seconds: 15);
+  client.idleTimeout = const Duration(seconds: 30);
   client.badCertificateCallback = (cert, host, port) {
     const allowed = {'4um.me', 'webrtc.4um.me', 'livekit.4um.me'};
     if (!allowed.contains(host)) return false;

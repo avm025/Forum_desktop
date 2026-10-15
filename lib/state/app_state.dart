@@ -1142,41 +1142,49 @@ class AppState extends ChangeNotifier {
   static bool dlgIdsEqual(String? a, String? b) => _sameDlgId(a, b);
 
   Future<void> initialize() async {
-    await GL.loadPersisted();
-    final cachedAppearance = await AppearancePrefs.load();
-    if (cachedAppearance != null) {
-      _appearance = cachedAppearance;
-    }
-    final cachedNotifications = await NotificationSettingsPrefs.load();
-    if (cachedNotifications != null) {
-      _notificationSettings = cachedNotifications;
-      // Один раз откатить ошибочную миграцию на «число сообщений».
-      final prefs = await SharedPreferences.getInstance();
-      const migrateKey = 'forum_badge_revert_chats_v1';
-      if (!(prefs.getBool(migrateKey) ?? false)) {
-        if (_notificationSettings.badgeCountMessages) {
-          _notificationSettings =
-              _notificationSettings.copyWith(badgeCountMessages: false);
-          unawaited(NotificationSettingsPrefs.save(_notificationSettings));
-        }
-        unawaited(prefs.setBool(migrateKey, true));
+    // authReady обязательно в finally — иначе splash крутится вечно
+    // (Windows: notifications / database / prefs могут зависнуть).
+    try {
+      await GL.loadPersisted();
+      final cachedAppearance = await AppearancePrefs.load();
+      if (cachedAppearance != null) {
+        _appearance = cachedAppearance;
       }
-    }
-    FirebaseService.instance.bindNotificationSettings(_notificationSettings);
-    await _loadDialogLocalPrefs();
-    await _loadDatabaseCatalogs();
-    await _setupDesktopNotifications();
+      final cachedNotifications = await NotificationSettingsPrefs.load();
+      if (cachedNotifications != null) {
+        _notificationSettings = cachedNotifications;
+        // Один раз откатить ошибочную миграцию на «число сообщений».
+        final prefs = await SharedPreferences.getInstance();
+        const migrateKey = 'forum_badge_revert_chats_v1';
+        if (!(prefs.getBool(migrateKey) ?? false)) {
+          if (_notificationSettings.badgeCountMessages) {
+            _notificationSettings =
+                _notificationSettings.copyWith(badgeCountMessages: false);
+            unawaited(NotificationSettingsPrefs.save(_notificationSettings));
+          }
+          unawaited(prefs.setBool(migrateKey, true));
+        }
+      }
+      FirebaseService.instance.bindNotificationSettings(_notificationSettings);
+      await _loadDialogLocalPrefs();
 
-    final token = await AuthSession.loadToken();
-    ApiConfig.setSessionToken(token);
-    _isAuthenticated = token != null && token.isNotEmpty;
-    _authReady = true;
-    notifyListeners();
-
-    if (!_isAuthenticated) {
-      return;
+      final token = await AuthSession.loadToken();
+      ApiConfig.setSessionToken(token);
+      _isAuthenticated = token != null && token.isNotEmpty;
+    } catch (e) {
+      ApiLogger.instance.logEvent('INIT', 'initialize: $e');
+    } finally {
+      _authReady = true;
+      notifyListeners();
     }
-    return _bootstrap();
+
+    // Сеть и плагины — после первого кадра UI, не блокируют splash.
+    unawaited(_setupDesktopNotifications());
+    unawaited(_loadDatabaseCatalogs());
+
+    if (_isAuthenticated) {
+      unawaited(_bootstrap());
+    }
   }
 
   Future<void> _setupDesktopNotifications() async {
