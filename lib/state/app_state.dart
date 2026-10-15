@@ -4728,92 +4728,104 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     final needPreview = <String>[];
     var changed = false;
+    // Раньше брали только 8 — остальные каналы так и не появлялись.
+    const batchSize = 8;
     try {
-      for (final id in needFetch.take(8)) {
-        try {
-          final info = await _api.fetchDlgInfo(
-            dlgId: id,
-            currentUserId: _profile?.id,
-          );
-          if (info.users.isEmpty &&
-              !info.isCh &&
-              (info.groupNick == null || info.groupNick!.trim().isEmpty)) {
-            continue;
-          }
-          _rememberChannelId(id);
-          final title = (info.groupNick ?? '').trim();
-          DlgInfoMember? channelUser;
-          for (final u in info.users) {
-            if (u.phone.trim() == id.trim()) {
-              channelUser = u;
-              break;
+      for (var offset = 0; offset < needFetch.length; offset += batchSize) {
+        final batch = needFetch.skip(offset).take(batchSize).toList();
+        for (final id in batch) {
+          try {
+            final info = await _api.fetchDlgInfo(
+              dlgId: id,
+              currentUserId: _profile?.id,
+            );
+            if (info.users.isEmpty &&
+                !info.isCh &&
+                (info.groupNick == null || info.groupNick!.trim().isEmpty)) {
+              continue;
             }
-          }
-          if (channelUser == null) {
+            _rememberChannelId(id);
+            final title = (info.groupNick ?? '').trim();
+            DlgInfoMember? channelUser;
             for (final u in info.users) {
-              if (u.isOwner) {
+              if (u.phone.trim() == id.trim()) {
                 channelUser = u;
                 break;
               }
             }
-          }
-          final resolved = title.isNotEmpty
-              ? title
-              : (channelUser?.name.trim() ?? '');
-          final ava = channelUser?.avatarUrl ?? '';
-
-          final existing = _findDialog(id);
-          if (existing != null) {
-            existing.isCh = true;
-            if (resolved.isNotEmpty &&
-                _isGenericChannelTitle(existing.chatName)) {
-              existing.chatName = resolved;
-              changed = true;
+            if (channelUser == null) {
+              for (final u in info.users) {
+                if (u.isOwner) {
+                  channelUser = u;
+                  break;
+                }
+              }
             }
-            final infoModel =
-                existing.groupAditionalInfo ?? GroupAditionalInfoModel();
-            if (resolved.isNotEmpty) infoModel.nick = resolved;
-            infoModel.isPublic = true;
-            existing.groupAditionalInfo = infoModel;
-            if (existing.last_msg.trim().isEmpty) needPreview.add(id);
+            final resolved = title.isNotEmpty
+                ? title
+                : (channelUser?.name.trim() ?? '');
+            final ava = channelUser?.avatarUrl ?? '';
+
+            final existing = _findDialog(id);
+            if (existing != null) {
+              existing.isCh = true;
+              if (resolved.isNotEmpty &&
+                  _isGenericChannelTitle(existing.chatName)) {
+                existing.chatName = resolved;
+                changed = true;
+              }
+              final infoModel =
+                  existing.groupAditionalInfo ?? GroupAditionalInfoModel();
+              if (resolved.isNotEmpty) infoModel.nick = resolved;
+              infoModel.isPublic = true;
+              existing.groupAditionalInfo = infoModel;
+              if (existing.last_msg.trim().isEmpty) needPreview.add(id);
+              ApiLogger.instance.logEvent(
+                'DLG_LIST',
+                'hydrate fix name dlg_id=$id → ${existing.chatName}',
+              );
+              continue;
+            }
+
+            if (resolved.isEmpty) continue;
+            final card = DialogsListViewModel(
+              id: id,
+              chatName: resolved,
+              avatar: ava,
+              colAvaId: channelUser?.colAvaId ?? 1,
+              isGrp: true,
+              isCh: true,
+              chatType: ChatType.groupChat,
+              groupAditionalInfo: GroupAditionalInfoModel(
+                desc: info.about ?? info.groupDesc,
+                nick: resolved,
+                isPublic: true,
+                colAvalId: channelUser?.colAvaId,
+              ),
+            );
+            _upsertDialog(card);
+            needPreview.add(id);
+            changed = true;
             ApiLogger.instance.logEvent(
               'DLG_LIST',
-              'hydrate fix name dlg_id=$id → ${existing.chatName}',
+              'hydrate channel dlg_id=$id name=$resolved is_ch=${info.isCh}',
             );
-            continue;
+          } catch (e) {
+            ApiLogger.instance.logEvent(
+              'DLG_LIST',
+              'hydrate channel $id failed: $e',
+            );
           }
-
-          if (resolved.isEmpty) continue;
-          final card = DialogsListViewModel(
-            id: id,
-            chatName: resolved,
-            avatar: ava,
-            colAvaId: channelUser?.colAvaId ?? 1,
-            isGrp: true,
-            isCh: true,
-            chatType: ChatType.groupChat,
-            groupAditionalInfo: GroupAditionalInfoModel(
-              desc: info.about ?? info.groupDesc,
-              nick: resolved,
-              isPublic: true,
-              colAvalId: channelUser?.colAvaId,
-            ),
-          );
-          _upsertDialog(card);
-          needPreview.add(id);
-          changed = true;
-          ApiLogger.instance.logEvent(
-            'DLG_LIST',
-            'hydrate channel dlg_id=$id name=$resolved is_ch=${info.isCh}',
-          );
-        } catch (e) {
-          ApiLogger.instance.logEvent(
-            'DLG_LIST',
-            'hydrate channel $id failed: $e',
-          );
+        }
+        if (changed) {
+          notifyListeners();
+          changed = false;
+        }
+        // Дать UI отрисовать промежуточный список.
+        if (offset + batchSize < needFetch.length) {
+          await Future<void>.delayed(const Duration(milliseconds: 16));
         }
       }
-      if (changed) notifyListeners();
       // Сразу превью — иначе пустая строка до клика по каналу.
       for (final id in needPreview) {
         await _fillDialogPreview(id, forceNetwork: true);
@@ -5126,13 +5138,13 @@ class AppState extends ChangeNotifier {
     if (_previewHydrateRunning) return;
     _previewHydrateRunning = true;
     try {
+      // Не ограничиваем 12: иначе часть каналов/чатов остаётся без превью.
       final need = _dialogs
           .where(
             (d) =>
                 d.last_msg.trim().isEmpty &&
                 !DialogsListViewModel.isPlaceholderDlgId(d.id),
           )
-          .take(12)
           .toList();
       for (final d in need) {
         await _waitWhileSelectedChatLoading();

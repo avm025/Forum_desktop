@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   firebase_core
   flutter_webrtc
   irondash_engine_context
+  just_audio_windows
   livekit_client
   record_windows
   super_native_extensions
