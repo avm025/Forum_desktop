@@ -2,10 +2,14 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+// Windows-бэкенд для video_player (официально Windows не поддерживается).
+// ignore: unused_import
+import 'package:video_player_win/video_player_win.dart';
 
 import '../api/api_config.dart';
 import '../models/media_file.dart';
 import '../services/media_thumb_cache.dart';
+import '../utils/file_opener.dart';
 import '../utils/media_file_loader.dart';
 import '../utils/media_file_url.dart';
 import '../utils/media_viewer_context.dart';
@@ -57,7 +61,6 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
   bool _loading = true;
   double? _progress;
   String _status = 'Загрузка…';
-
   @override
   void initState() {
     super.initState();
@@ -147,6 +150,10 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
         await controller.dispose();
         return false;
       }
+      if (controller.value.hasError) {
+        await controller.dispose();
+        return false;
+      }
       controller.addListener(_onTick);
       setState(() {
         _controller = controller;
@@ -175,10 +182,17 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
       throw StateError('Локальный файл пуст');
     }
     final controller = VideoPlayerController.file(file);
-    await controller.initialize();
+    await controller.initialize().timeout(const Duration(seconds: 20));
     if (!mounted) {
       controller.dispose();
       return;
+    }
+    if (!controller.value.isInitialized || controller.value.hasError) {
+      await controller.dispose();
+      throw StateError(
+        controller.value.errorDescription ??
+            'Плеер не смог открыть файл (кодек?)',
+      );
     }
     controller.addListener(_onTick);
     setState(() {
@@ -187,6 +201,15 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
       _error = null;
     });
     await controller.play();
+  }
+
+  Future<void> _openExternally() async {
+    final opened = await FileOpener.open(widget.file);
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось открыть видео')),
+      );
+    }
   }
 
   void _onTick() {
@@ -199,6 +222,10 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
     setState(() {
       c.value.isPlaying ? c.pause() : c.play();
     });
+  }
+
+  void _close() {
+    if (mounted) Navigator.of(context).maybePop();
   }
 
   @override
@@ -214,7 +241,8 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
         _controller != null && _controller!.value.isInitialized && !_loading;
 
     return TelegramMediaOverlayShell(
-      showCloseButton: false,
+      // На Windows без крестика оверлей «залипает» — Esc/тап мимо неочевидны.
+      showCloseButton: true,
       viewerContext: widget.viewerContext,
       bottomBar: ready
           ? Align(
@@ -272,10 +300,38 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
     if (_error != null) {
       return ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxW),
-        child: Text(
-          'Не удалось загрузить видео\n$_error',
-          style: const TextStyle(color: Colors.white70, fontSize: 13),
-          textAlign: TextAlign.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Не удалось воспроизвести видео\n$_error',
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                TextButton.icon(
+                  onPressed: _openExternally,
+                  icon: const Icon(Icons.open_in_new, color: Colors.white),
+                  label: const Text(
+                    'Открыть в плеере Windows',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _close,
+                  child: const Text(
+                    'Закрыть',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       );
     }
@@ -326,7 +382,12 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              IconButton(
+                tooltip: 'Открыть снаружи',
+                icon: const Icon(Icons.open_in_new, color: Colors.white70),
+                onPressed: _openExternally,
+              ),
+              const SizedBox(width: 4),
             ],
           ),
         ),
