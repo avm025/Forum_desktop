@@ -8,6 +8,7 @@ import '../models/media_file.dart';
 import '../services/media_thumb_cache.dart';
 import '../theme/app_theme.dart';
 import '../utils/attachment_selection.dart';
+import '../utils/media_dims.dart';
 import '../utils/media_message_layout.dart';
 import 'draggable_attachment_group.dart';
 import 'media_thumb_tile.dart';
@@ -68,6 +69,25 @@ class _MediaGridState extends State<MediaGrid> {
     AttachmentSelection.ensureKeyboardBound();
     AttachmentSelection.clearToken.addListener(_onGlobalClear);
     AttachmentSelection.activeOwner.addListener(_onOwnerChanged);
+    unawaited(_probeDimensions());
+  }
+
+  @override
+  void didUpdateWidget(covariant MediaGrid oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.files, widget.files) ||
+        oldWidget.files.length != widget.files.length) {
+      unawaited(_probeDimensions());
+    }
+  }
+
+  /// Добиваем width/height — иначе пузырь квадратный / не по кадру.
+  Future<void> _probeDimensions() async {
+    var changed = false;
+    for (final f in _list) {
+      if (await MediaDims.ensure(f)) changed = true;
+    }
+    if (changed && mounted) setState(() {});
   }
 
   @override

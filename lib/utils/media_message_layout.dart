@@ -37,8 +37,10 @@ class MediaMessageLayout {
   static double _aspect(MediaFile file) {
     final w = file.widthValue;
     final h = file.heightValue;
-    if (w <= 0 || h <= 0) return 1;
-    return w / h;
+    if (w > 0 && h > 0) return w / h;
+    // Без метаданных сервера: видео ≈ 16:9, фото ≈ 3:4 (не квадрат 1:1).
+    if (file.isVideo) return 16 / 9;
+    return 3 / 4;
   }
 
   /// Ряды без пустот: каждая строка на всю [width], последний тайл ряда

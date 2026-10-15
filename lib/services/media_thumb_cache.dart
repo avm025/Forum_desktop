@@ -290,7 +290,8 @@ class MediaThumbCache {
     }
 
     if (!VideoConverter.isSupported) {
-      throw UnsupportedError('Извлечение кадра видео доступно только на macOS/iOS');
+      // Windows/Linux: кадр рисует InlineVideoPreview; HTTP preview уже пробовали.
+      throw UnsupportedError('Video frame extract only on macOS/iOS');
     }
 
     await _acquireVideoSlot();

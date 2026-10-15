@@ -73,20 +73,21 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
     try {
       final downloadUrl = MediaFileUrl.resolve(widget.file);
 
+      // 1) Локальный путь / кэш — без сети.
+      final localPath = widget.file.URL?.trim() ?? '';
+      if (localPath.isNotEmpty &&
+          !localPath.startsWith('http') &&
+          File(localPath).existsSync()) {
+        await _playLocal(localPath);
+        return;
+      }
+
       final cached = await MediaFileLoader.cachedPathIfExists(
         widget.file,
         downloadUrl: downloadUrl,
       );
       if (cached != null) {
         await _playLocal(cached);
-        return;
-      }
-
-      final localPath = widget.file.URL?.trim() ?? '';
-      if (localPath.isNotEmpty &&
-          !localPath.startsWith('http') &&
-          File(localPath).existsSync()) {
-        await _playLocal(localPath);
         return;
       }
 
@@ -98,9 +99,11 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
             _progress = null;
           });
         }
+        // 2) Стрим — без полного скачивания (быстрее на Windows).
         final streamed = await _tryPlayNetwork(downloadUrl);
         if (streamed) return;
 
+        // 3) Fallback — скачать файл.
         if (mounted) {
           setState(() {
             _status = 'Скачивание…';
@@ -141,16 +144,13 @@ class _FullscreenVideoViewerState extends State<FullscreenVideoViewer> {
         Uri.parse(ApiConfig.rewriteLegacyHost(url)),
         httpHeaders: ApiConfig.fileHeaders,
       );
-      await controller.initialize().timeout(const Duration(seconds: 20));
+      // Короткий таймаут: при зависании быстрее уходим в скачивание.
+      await controller.initialize().timeout(const Duration(seconds: 10));
       if (!mounted) {
         await controller.dispose();
         return false;
       }
-      if (!controller.value.isInitialized) {
-        await controller.dispose();
-        return false;
-      }
-      if (controller.value.hasError) {
+      if (!controller.value.isInitialized || controller.value.hasError) {
         await controller.dispose();
         return false;
       }

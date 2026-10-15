@@ -1,11 +1,12 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/media_file.dart';
 import '../services/media_thumb_cache.dart';
-import '../theme/app_colors.dart';
 import '../utils/file_kind.dart';
+import 'inline_video_preview.dart';
 
 /// Превью медиа в сообщении.
 ///
@@ -235,7 +236,7 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
     final cw = (w * dpr).round().clamp(1, 1024);
     final ch = (h * dpr).round().clamp(1, 1024);
 
-    // Видео: mp4/mov нельзя в Image.file — только кадр-превью.
+    // Видео: JPEG-кадр (macOS) или живой VideoPlayer (Windows / fallback).
     if (_isVideo) {
       if (_cachedFile != null) {
         return Image.file(
@@ -249,10 +250,26 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
           cacheHeight: ch,
           filterQuality: FilterQuality.low,
           frameBuilder: _frameBuilder,
-          errorBuilder: (_, __, ___) => _placeholder(w, h, error: true),
+          errorBuilder: (_, __, ___) => InlineVideoPreview(
+            file: file,
+            width: w,
+            height: h,
+            fit: widget.fit,
+          ),
         );
       }
-      if (_error) return _placeholder(w, h, error: true);
+      // Windows: native extract нет — сразу кадр через video_player.
+      if (!kIsWeb &&
+          (Platform.isWindows || Platform.isLinux || _error)) {
+        return InlineVideoPreview(
+          key: ValueKey('vplay_${_stableKey(file)}'),
+          file: file,
+          width: w,
+          height: h,
+          fit: widget.fit,
+        );
+      }
+      if (_error) return _blank(w, h);
       return _blank(w, h);
     }
 
@@ -273,7 +290,7 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
           cacheHeight: ch,
           filterQuality: FilterQuality.low,
           frameBuilder: _frameBuilder,
-          errorBuilder: (_, __, ___) => _placeholder(w, h, error: true),
+          errorBuilder: (_, __, ___) => _blank(w, h),
         );
       }
     }
@@ -293,6 +310,7 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         cacheHeight: ch,
         filterQuality: FilterQuality.low,
         frameBuilder: _frameBuilder,
+        errorBuilder: (_, __, ___) => _blank(w, h),
       );
     }
 
@@ -308,14 +326,11 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
         cacheHeight: ch,
         filterQuality: FilterQuality.low,
         frameBuilder: _frameBuilder,
+        errorBuilder: (_, __, ___) => _blank(w, h),
       );
     }
 
-    if (_error) {
-      return _placeholder(w, h, error: true);
-    }
-
-    // Загрузка / ожидание — нейтральный фон, без градиента и иконки.
+    // Загрузка / ошибка — нейтральный фон, без градиента и иконок.
     return _blank(w, h);
   }
 
@@ -334,31 +349,6 @@ class _MediaThumbTileState extends State<MediaThumbTile> {
       width: w,
       height: h,
       child: const ColoredBox(color: Color(0x22000000)),
-    );
-  }
-
-  Widget _placeholder(double w, double h, {bool error = false}) {
-    if (!error) return _blank(w, h);
-    final media = widget.file;
-    final gradient = AppColors.avatarGradientFor(
-      media.hash.isNotEmpty ? media.hash : media.url,
-    );
-    return Container(
-      width: w,
-      height: h,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: gradient,
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
-      alignment: Alignment.center,
-      child: Icon(
-        _isVideo ? Icons.videocam_outlined : Icons.broken_image_outlined,
-        color: Colors.white54,
-        size: 40,
-      ),
     );
   }
 

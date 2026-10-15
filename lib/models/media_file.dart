@@ -103,7 +103,13 @@ class MediaFile {
     var w = widthValue;
     var h = heightValue;
     if (w <= 0 || h <= 0) {
-      return Size(maxWidth, maxWidth * 0.75);
+      // Видео 16:9, фото 3:4 — не квадратная заглушка.
+      if (isVideo) {
+        final height = (maxWidth * 9 / 16).clamp(48.0, maxHeight);
+        return Size(maxWidth, height);
+      }
+      final height = (maxWidth * 4 / 3).clamp(48.0, maxHeight);
+      return Size(maxWidth * 0.85, height * 0.85);
     }
     final scale = math.min(1.0, math.min(maxWidth / w, maxHeight / h));
     return Size(w * scale, h * scale);
